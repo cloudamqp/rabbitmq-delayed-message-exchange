@@ -26,7 +26,8 @@
 -export([start_link/0, delay_message/3, setup_mnesia/0, disable_plugin/0, go/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
--export([messages_delayed/1]).
+-export([messages_delayed/1,
+         update_config/2]).
 
 -import(rabbit_delayed_message_utils, [swap_delay_header/1]).
 
@@ -37,19 +38,25 @@
 -spec delay_message(rabbit_types:exchange(),
                     rabbit_types:delivery(),
                     delay()) ->
-                           nodelay | {ok, t_reference()}.
+                           no_change | {ok, t_reference()}.
 
 -spec internal_delay_message(t_reference(),
                              rabbit_types:exchange(),
                              rabbit_types:delivery(),
-                             delay()) ->
-                                    nodelay | {ok, t_reference()}.
+                             delay(),
+                             timeout()) ->
+                                    no_change | {ok, t_reference()}.
 
 -define(SERVER, ?MODULE).
 -define(TABLE_NAME, append_to_atom(?MODULE, node())).
 -define(INDEX_TABLE_NAME, append_to_atom(?TABLE_NAME, "_index")).
+-define(LONGTERM_TABLE_NAME, append_to_atom(?TABLE_NAME, "_longterm")).
 
--record(state, {timer}).
+-define(SHORTTERM, 1).
+-define(LONGTERM, 2).
+
+-record(state, {timer :: not_set | t_reference(),
+                longterm_threshold :: timeout()}).
 
 -record(delay_key,
         { timestamp, %% timestamp delay
@@ -90,29 +97,51 @@ setup_mnesia() ->
                                              record_info(fields, delay_index)},
                                             {type, ordered_set},
                                             {disc_copies, [node()]}]),
-    rabbit_table:wait([?TABLE_NAME, ?INDEX_TABLE_NAME]).
+    mnesia:create_table(?LONGTERM_TABLE_NAME,
+                        [{record_name, delay_entry},
+                         {attributes,
+                          record_info(fields, delay_entry)},
+                         {type, bag},
+                         {disc_only_copies, [node()]}]),
+    rabbit_table:wait([?TABLE_NAME,
+                       ?LONGTERM_TABLE_NAME,
+                       ?INDEX_TABLE_NAME]).
 
 disable_plugin() ->
     mnesia:delete_table(?INDEX_TABLE_NAME),
     mnesia:delete_table(?TABLE_NAME),
+    mnesia:delete_table(?LONGTERM_TABLE_NAME),
     ok.
 
-messages_delayed(Exchange) ->
-    ExchangeName = Exchange#exchange.name,
-    MatchHead = #delay_entry{delay_key = make_key('_', #exchange{name = ExchangeName, _ = '_'}),
-                             delivery  = '_', ref       = '_'},
-    Delays = mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], ['$_']}]),
+messages_delayed(#exchange{name = ExchangeName}) ->
+    messages_delayed(ExchangeName);
+messages_delayed(ExchangeName = #resource{}) ->
+    MatchHead = #delay_entry{delay_key = make_key('_', '_', ExchangeName),
+                             _ = '_'},
+    MatchHeadLegacy = #delay_entry{delay_key = #delay_key{exchange  = #exchange{name = ExchangeName, _ = '_'}},
+                                   _  = '_'},
+    Delays = mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], [{const, match}]},
+                                               {MatchHeadLegacy, [], [{const, match}]}]),
     length(Delays).
+
+update_config(longterm_threshold, Value)
+  when is_integer(Value), Value >= 0;
+       Value =:= infinity ->
+    gen_server:call(?MODULE, {update_config, longterm_threshold, Value}).
 
 %%--------------------------------------------------------------------
 
 init([]) ->
     recover(),
-    {ok, #state{timer = not_set}}.
+    LongTermThreshold = application:get_env(
+                          rabbitmq_delayed_message_exchange, longterm_threshold, infinity),
+    {ok, #state{timer = not_set,
+                longterm_threshold = LongTermThreshold}}.
 
 handle_call({delay_message, Exchange, Delivery, Delay},
-            _From, State = #state{timer = CurrTimer}) ->
-    Reply = internal_delay_message(CurrTimer, Exchange, Delivery, Delay),
+            _From, State = #state{timer = CurrTimer,
+                                  longterm_threshold = LongTermThreshold}) ->
+    Reply = internal_delay_message(CurrTimer, Exchange, Delivery, Delay, LongTermThreshold),
     State2 = case Reply of
                  {ok, NewTimer} ->
                      State#state{timer = NewTimer};
@@ -120,6 +149,8 @@ handle_call({delay_message, Exchange, Delivery, Delay},
                      State
              end,
     {reply, Reply, State2};
+handle_call({update_config, longterm_threshold, Value}, _From, State) ->
+    {reply, ok, State#state{longterm_threshold = Value}};
 handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
@@ -129,12 +160,13 @@ handle_cast(_C, State) ->
     {noreply, State}.
 
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
-    case mnesia:dirty_read(?TABLE_NAME, Key) of
+    Table = table_name_from_key(Key),
+    case mnesia:dirty_read(Table, Key) of
         [] ->
             ok;
         Deliveries ->
             route(Key, Deliveries),
-            mnesia:dirty_delete(?TABLE_NAME, Key),
+            mnesia:dirty_delete(Table, Key),
             mnesia:dirty_delete(?INDEX_TABLE_NAME, Key)
     end,
     {noreply, State#state{timer = maybe_delay_first()}};
@@ -161,38 +193,44 @@ maybe_delay_first() ->
     end.
 
 route(#delay_key{exchange = Ex}, Deliveries) ->
-    lists:map(fun (#delay_entry{delivery = D}) ->
-                      D2 = swap_delay_header(D),
-                      Dests = rabbit_exchange:route(Ex, D2),
-                      Qs = rabbit_amqqueue:lookup(Dests),
-                      rabbit_amqqueue:deliver(Qs, D2)
-              end, Deliveries).
+    case lookup_exchange(Ex) of
+        {ok, Exchange} ->
+            lists:map(fun (#delay_entry{delivery = D}) ->
+                              D2 = swap_delay_header(D),
+                              Dests = rabbit_exchange:route(Exchange, D2),
+                              Qs = rabbit_amqqueue:lookup(Dests),
+                              rabbit_amqqueue:deliver(Qs, D2)
+                      end, Deliveries);
+        {error, not_found} ->
+            []
+    end.
 
-internal_delay_message(CurrTimer, Exchange, Delivery, Delay) ->
+internal_delay_message(CurrTimer, Exchange, Delivery, Delay, LongTermThreshold) ->
     Now = erlang:system_time(milli_seconds),
     %% keys are timestamps in milliseconds,in the future
     DelayTS = Now + Delay,
+    IsLongTerm = is_long_term(Delay, LongTermThreshold),
     mnesia:dirty_write(?INDEX_TABLE_NAME,
-                       make_index(DelayTS, Exchange)),
-    mnesia:dirty_write(?TABLE_NAME,
-                       make_delay(DelayTS, Exchange, Delivery)),
+                       make_index(DelayTS, IsLongTerm, Exchange)),
+    mnesia:dirty_write(table_name(IsLongTerm),
+                       make_delay(DelayTS, IsLongTerm, Exchange, Delivery)),
     case CurrTimer of
         not_set ->
             %% No timer in progress, so we start our own.
-            {ok, maybe_delay_first()};
+            {ok, start_timer(Delay, make_key(DelayTS, IsLongTerm, Exchange))};
         _ ->
             case erlang:read_timer(CurrTimer) of
                 false ->
                     %% Timer is already expired.  Handler will be invoked soon.
-                    {ok, CurrTimer};
+                    no_change;
                 CurrMS when Delay < CurrMS ->
                     %% Current timer lasts longer that new message delay
                     erlang:cancel_timer(CurrTimer),
-                    {ok, start_timer(Delay, make_key(DelayTS, Exchange))};
+                    {ok, start_timer(Delay, make_key(DelayTS, IsLongTerm, Exchange))};
                 _ ->
                     %% Timer is set to expire sooner than this
                     %% message's scheduled delivery time.
-                    {ok, CurrTimer}
+                    no_change
             end
     end.
 
@@ -201,18 +239,20 @@ internal_delay_message(CurrTimer, Exchange, Delivery, Delay) ->
 start_timer(Delay, Key) ->
     erlang:start_timer(erlang:max(0, Delay), self(), {deliver, Key}).
 
-make_delay(DelayTS, Exchange, Delivery) ->
-    #delay_entry{delay_key = make_key(DelayTS, Exchange),
+make_delay(DelayTS, IsLongTerm, Exchange, Delivery) ->
+    #delay_entry{delay_key = make_key(DelayTS, IsLongTerm, Exchange),
                  delivery  = Delivery,
                  ref       = make_ref()}.
 
-make_index(DelayTS, Exchange) ->
-    #delay_index{delay_key = make_key(DelayTS, Exchange),
+make_index(DelayTS, IsLongTerm, Exchange) ->
+    #delay_index{delay_key = make_key(DelayTS, IsLongTerm, Exchange),
                  const = true}.
 
-make_key(DelayTS, Exchange) ->
+make_key(DelayTS, IsLongTerm, #exchange{name = ExchangeName}) ->
+    make_key(DelayTS, IsLongTerm, ExchangeName);
+make_key(DelayTS, IsLongTerm, ExchangeName = #resource{}) ->
     #delay_key{timestamp = DelayTS,
-               exchange  = Exchange}.
+               exchange  = {IsLongTerm, ExchangeName}}.
 
 append_to_atom(Atom, Append) when is_atom(Append) ->
     append_to_atom(Atom, atom_to_list(Append));
@@ -260,3 +300,29 @@ recover_exchange_and_bindings(#exchange{name = XName} = X) ->
                               "recovered bindings for ~s",
                              [rabbit_misc:rs(XName)])
     end).
+
+-spec is_long_term(delay(), timeout()) -> ?SHORTTERM | ?LONGTERM.
+is_long_term(_, infinity) ->
+    ?SHORTTERM;
+is_long_term(Delay, LongTermThreshold) ->
+    case Delay > LongTermThreshold of
+        true -> ?LONGTERM;
+        false -> ?SHORTTERM
+    end.
+
+table_name(?SHORTTERM) ->
+    ?TABLE_NAME;
+table_name(?LONGTERM) ->
+    ?LONGTERM_TABLE_NAME.
+
+table_name_from_key(#delay_key{exchange = {IsLongTerm, _}}) ->
+    table_name(IsLongTerm);
+table_name_from_key(_) ->
+    %% legacy key #delay_key{exchange = #exchange{}}, always short term
+    ?TABLE_NAME.
+
+lookup_exchange({_, ExName = #resource{}}) ->
+    rabbit_exchange:lookup(ExName);
+lookup_exchange(Ex = #exchange{}) ->
+    %% legacy format
+    {ok, Ex}.

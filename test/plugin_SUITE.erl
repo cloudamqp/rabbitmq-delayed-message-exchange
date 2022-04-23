@@ -28,6 +28,7 @@ groups() ->
                                 routing_fanout,
                                 e2e_nodelay,
                                 e2e_delay,
+                                e2e_longterm_delay,
                                 delay_order,
                                 delayed_messages_count,
                                 node_restart_before_delay_expires,
@@ -150,9 +151,17 @@ e2e_nodelay(Config) ->
     e2e_test0(Config, [0]).
 
 e2e_delay(Config) ->
-    %% message delay will be 0,
-    %% we are testing e2e without delays
     e2e_test0(Config, [500, 100, 300, 200, 100, 400]).
+
+e2e_longterm_delay(Config) ->
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, update_config,
+                                      [longterm_threshold, 350]),
+    try
+        e2e_test0(Config, [500, 100, 300, 200, 100, 400])
+    after
+        ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, update_config,
+                                          [longterm_threshold, infinity])
+    end.
 
 e2e_test0(Config, Msgs) ->
     Chan =  rabbit_ct_client_helpers:open_channel(Config),
