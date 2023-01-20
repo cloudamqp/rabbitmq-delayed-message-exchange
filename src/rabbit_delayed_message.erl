@@ -61,14 +61,21 @@
           exchange   %% rabbit_types:exchange()
         }).
 
+-record(delay_key_v2,
+        { timestamp,  %% timestamp delay
+          unique_ref, %% reference() to make the key unique
+          exchange    %% rabbit_types:exchange()
+        }).
+
 -record(delay_entry,
-        { delay_key, %% delay_key record
+        { delay_key, %% delay_key(_v2) record
           delivery,  %% the message delivery
-          ref        %% ref to make records distinct for 'bag' semantics.
+          ref        %% only used for legacy entries.
+                     %% ref to make records distinct for 'bag' semantics.
         }).
 
 -record(delay_index,
-        { delay_key, %% delay_key record
+        { delay_key, %% delay_key(_v2) record
           const      %% record must have two fields
         }).
 
@@ -104,9 +111,14 @@ disable_plugin() ->
 
 messages_delayed(Exchange) ->
     ExchangeName = Exchange#exchange.name,
-    MatchHead = #delay_entry{delay_key = make_key('_', #exchange{name = ExchangeName, _ = '_'}),
-                             delivery  = '_', ref       = '_'},
-    Delays = mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], [true]}]),
+    KeyPattern = #delay_key_v2{exchange = #exchange{name = ExchangeName, _ = '_'},
+                               _ = '_'},
+    MatchHead = #delay_entry{delay_key = KeyPattern, _ = '_'},
+    LegacyKeyPattern = #delay_key{exchange = #exchange{name = ExchangeName, _ = '_'},
+                                  _ = '_'},
+    LegacyMatchHead = #delay_entry{delay_key = LegacyKeyPattern, _ = '_'},
+    Delays = mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], [true]},
+                                               {LegacyMatchHead, [], [true]}]),
     length(Delays).
 
 refresh_config() ->
@@ -155,18 +167,19 @@ code_change(_, State, _) -> {ok, State}.
 %%--------------------------------------------------------------------
 
 maybe_delay_first() ->
-    case mnesia:dirty_first(?INDEX_TABLE_NAME) of
-        %% destructuring to prevent matching '$end_of_table'
-        #delay_key{timestamp = FirstTS} = Key2 ->
+    FirstKey = mnesia:dirty_first(?INDEX_TABLE_NAME),
+    case timestamp_from_key(FirstKey) of
+        not_found ->
+            %% nothing to do
+            not_set;
+        FirstTS ->
             %% there are messages that will expire and need to be delivered
             Now = erlang:system_time(milli_seconds),
-            start_timer(FirstTS - Now, Key2);
-        _ ->
-            %% nothing to do
-            not_set
+            start_timer(FirstTS - Now, FirstKey)
     end.
 
-route(#delay_key{exchange = Ex}, Deliveries, State) ->
+route(Key, Deliveries, State) ->
+    Ex = exchange_from_key(Key),
     ExName = Ex#exchange.name,
     lists:map(fun (#delay_entry{delivery = D}) ->
                       D2 = swap_delay_header(D),
@@ -180,10 +193,11 @@ internal_delay_message(CurrTimer, Exchange, Delivery, Delay) ->
     Now = erlang:system_time(milli_seconds),
     %% keys are timestamps in milliseconds,in the future
     DelayTS = Now + Delay,
+    Key = make_key(DelayTS, Exchange),
     mnesia:dirty_write(?INDEX_TABLE_NAME,
-                       make_index(DelayTS, Exchange)),
+                       make_index(Key)),
     mnesia:dirty_write(?TABLE_NAME,
-                       make_delay(DelayTS, Exchange, Delivery)),
+                       make_delay(Key, Delivery)),
     case CurrTimer of
         not_set ->
             %% No timer in progress, so we start our own.
@@ -209,18 +223,32 @@ internal_delay_message(CurrTimer, Exchange, Delivery, Delay) ->
 start_timer(Delay, Key) ->
     erlang:start_timer(erlang:max(0, Delay), self(), {deliver, Key}).
 
-make_delay(DelayTS, Exchange, Delivery) ->
-    #delay_entry{delay_key = make_key(DelayTS, Exchange),
+make_delay(Key, Delivery) ->
+    #delay_entry{delay_key = Key,
                  delivery  = Delivery,
-                 ref       = make_ref()}.
+                 ref       = true}.
 
-make_index(DelayTS, Exchange) ->
-    #delay_index{delay_key = make_key(DelayTS, Exchange),
+make_index(Key) ->
+    #delay_index{delay_key = Key,
                  const = true}.
 
 make_key(DelayTS, Exchange) ->
-    #delay_key{timestamp = DelayTS,
-               exchange  = Exchange}.
+    #delay_key_v2{timestamp = DelayTS,
+                  unique_ref = make_ref(),
+                  exchange  = Exchange}.
+
+exchange_from_key(#delay_key{exchange = Ex}) ->
+    Ex;
+exchange_from_key(#delay_key_v2{exchange = Ex}) ->
+    Ex.
+
+timestamp_from_key(#delay_key{timestamp = TS}) ->
+    TS;
+timestamp_from_key(#delay_key_v2{timestamp = TS}) ->
+    TS;
+timestamp_from_key(_) ->
+    not_found.
+
 
 append_to_atom(Atom, Append) when is_atom(Append) ->
     append_to_atom(Atom, atom_to_list(Append));
