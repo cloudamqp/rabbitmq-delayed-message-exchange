@@ -45,7 +45,6 @@
                            nodelay | {ok, t_reference()}.
 
 -spec internal_delay_message(t_reference(),
-                             rabbit_types:exchange(),
                              rabbit_types:delivery(),
                              delay()) ->
                                     nodelay | {ok, t_reference()}.
@@ -63,8 +62,7 @@
 
 -record(delay_key_v2,
         { timestamp,  %% timestamp delay
-          unique_ref, %% reference() to make the key unique
-          exchange    %% rabbit_types:exchange()
+          unique_ref  %% reference() to make the key unique
         }).
 
 -record(delay_entry,
@@ -111,14 +109,12 @@ disable_plugin() ->
 
 messages_delayed(Exchange) ->
     ExchangeName = Exchange#exchange.name,
-    KeyPattern = #delay_key_v2{exchange = #exchange{name = ExchangeName, _ = '_'},
-                               _ = '_'},
-    MatchHead = #delay_entry{delay_key = KeyPattern, _ = '_'},
-    LegacyKeyPattern = #delay_key{exchange = #exchange{name = ExchangeName, _ = '_'},
-                                  _ = '_'},
-    LegacyMatchHead = #delay_entry{delay_key = LegacyKeyPattern, _ = '_'},
-    Delays = mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], [true]},
-                                               {LegacyMatchHead, [], [true]}]),
+    MatchHead =
+        #delay_entry{delivery = #delivery{message = #basic_message{exchange_name = ExchangeName,
+                                                                   _ = '_'},
+                                          _ = '_'},
+                     _ = '_'},
+    Delays = mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], [true]}]),
     length(Delays).
 
 refresh_config() ->
@@ -130,9 +126,9 @@ init([]) ->
     recover(),
     {ok, #state{timer = not_set}}.
 
-handle_call({delay_message, Exchange, Delivery, Delay},
+handle_call({delay_message, _Exchange, Delivery, Delay},
             _From, State = #state{timer = CurrTimer}) ->
-    Reply = {ok, NewTimer} = internal_delay_message(CurrTimer, Exchange, Delivery, Delay),
+    Reply = {ok, NewTimer} = internal_delay_message(CurrTimer, Delivery, Delay),
     State2 = State#state{timer = NewTimer},
     {reply, Reply, State2};
 handle_call(refresh_config, _From, State) ->
@@ -178,8 +174,25 @@ maybe_delay_first() ->
             start_timer(FirstTS - Now, FirstKey)
     end.
 
-route(Key, Deliveries, State) ->
-    Ex = exchange_from_key(Key),
+route(#delay_key{} = Key, Deliveries, State) ->
+    route_legacy(Key, Deliveries, State);
+route(_, [Delivery], State) ->
+    route(Delivery, State).
+
+route(#delay_entry{delivery = D}, State) ->
+    ExName = exchange_name_from_delivery(D),
+    case rabbit_exchange:lookup(ExName) of
+        {ok, Ex} ->
+            D2 = swap_delay_header(D),
+            Dests = rabbit_exchange:route(Ex, D2),
+            Qs = rabbit_amqqueue:lookup(Dests),
+            rabbit_amqqueue:deliver(Qs, D2),
+            bump_routed_stats(ExName, Qs, State);
+        Error ->
+            Error
+    end.
+
+route_legacy(#delay_key{exchange = Ex}, Deliveries, State) ->
     ExName = Ex#exchange.name,
     lists:map(fun (#delay_entry{delivery = D}) ->
                       D2 = swap_delay_header(D),
@@ -189,11 +202,11 @@ route(Key, Deliveries, State) ->
                       bump_routed_stats(ExName, Qs, State)
               end, Deliveries).
 
-internal_delay_message(CurrTimer, Exchange, Delivery, Delay) ->
+internal_delay_message(CurrTimer, Delivery, Delay) ->
     Now = erlang:system_time(milli_seconds),
     %% keys are timestamps in milliseconds,in the future
     DelayTS = Now + Delay,
-    Key = make_key(DelayTS, Exchange),
+    Key = make_key(DelayTS),
     mnesia:dirty_write(?INDEX_TABLE_NAME,
                        make_index(Key)),
     mnesia:dirty_write(?TABLE_NAME,
@@ -210,7 +223,7 @@ internal_delay_message(CurrTimer, Exchange, Delivery, Delay) ->
                 CurrMS when Delay < CurrMS ->
                     %% Current timer lasts longer that new message delay
                     erlang:cancel_timer(CurrTimer),
-                    {ok, start_timer(Delay, make_key(DelayTS, Exchange))};
+                    {ok, start_timer(Delay, make_key(DelayTS))};
                 _ ->
                     %% Timer is set to expire sooner than this
                     %% message's scheduled delivery time.
@@ -232,15 +245,9 @@ make_index(Key) ->
     #delay_index{delay_key = Key,
                  const = true}.
 
-make_key(DelayTS, Exchange) ->
+make_key(DelayTS) ->
     #delay_key_v2{timestamp = DelayTS,
-                  unique_ref = make_ref(),
-                  exchange  = Exchange}.
-
-exchange_from_key(#delay_key{exchange = Ex}) ->
-    Ex;
-exchange_from_key(#delay_key_v2{exchange = Ex}) ->
-    Ex.
+                  unique_ref = make_ref()}.
 
 timestamp_from_key(#delay_key{timestamp = TS}) ->
     TS;
@@ -249,6 +256,8 @@ timestamp_from_key(#delay_key_v2{timestamp = TS}) ->
 timestamp_from_key(_) ->
     not_found.
 
+exchange_name_from_delivery(#delivery{message = #basic_message{exchange_name = ExchangeName}}) ->
+    ExchangeName.
 
 append_to_atom(Atom, Append) when is_atom(Append) ->
     append_to_atom(Atom, atom_to_list(Append));
