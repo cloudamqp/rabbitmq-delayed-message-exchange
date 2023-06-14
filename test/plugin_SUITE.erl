@@ -30,6 +30,7 @@ groups() ->
                                 e2e_delay,
                                 delay_order,
                                 delayed_messages_count,
+                                purge_exchange,
                                 node_restart_before_delay_expires,
                                 node_restart_after_delay_expires,
                                 no_message_for_index,
@@ -266,6 +267,56 @@ delayed_messages_count(Config) ->
     consume(Chan, Q, Msgs),
 
     rabbit_ct_broker_helpers:clear_policy(Config, 0, PolicyName),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+purge_exchange(Config) ->
+    Chan =  rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex1 = make_exchange_name(Config, "1"),
+    Ex2 = make_exchange_name(Config, "2"),
+    Q = make_queue_name(Config, "1"),
+
+    declare_exchange(Chan, make_exchange(Ex1, <<"direct">>)),
+    declare_exchange(Chan, make_exchange(Ex2, <<"direct">>)),
+
+    Msgs = [1000, 2000, 3000],
+    publish_messages(Chan, Ex1, Msgs),
+
+    Msgs2 = [1000, 2000],
+    publish_messages(Chan, Ex2, Msgs2),
+
+    FilterEx =
+        fun(ExName) ->
+                fun(X) ->
+                        {resource, <<"/">>, exchange, ExName} == proplists:get_value(name, X)
+                end
+        end,
+
+    Exchanges = rabbit_ct_broker_helpers:rpc(Config, 0,
+          rabbit_exchange, info_all, [<<"/">>]),
+
+    [Exchange1] = lists:filter(FilterEx(Ex1), Exchanges),
+    {messages_delayed, 3} = proplists:lookup(messages_delayed, Exchange1),
+
+    [Exchange2] = lists:filter(FilterEx(Ex2), Exchanges),
+    {messages_delayed, 2} = proplists:lookup(messages_delayed, Exchange2),
+
+    rabbit_ct_broker_helpers:rpc(Config, 0,
+      rabbit_delayed_message, purge_exchange, [{resource, <<"/">>, exchange, Ex1}]),
+
+    ExchangesAfter = rabbit_ct_broker_helpers:rpc(Config, 0,
+          rabbit_exchange, info_all, [<<"/">>]),
+
+    [Exchange1After] = lists:filter(FilterEx(Ex1), ExchangesAfter),
+    {messages_delayed, 0} = proplists:lookup(messages_delayed, Exchange1After),
+
+    %% Other exchange unchanged
+    [Exchange2After] = lists:filter(FilterEx(Ex2), ExchangesAfter),
+    {messages_delayed, 2} = proplists:lookup(messages_delayed, Exchange2After),
+
+    amqp_channel:call(Chan, #'exchange.delete' { exchange = Ex1 }),
+    amqp_channel:call(Chan, #'exchange.delete' { exchange = Ex2 }),
     rabbit_ct_client_helpers:close_channel(Chan),
     ok.
 

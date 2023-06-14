@@ -26,7 +26,8 @@
 -export([start_link/0, delay_message/3, setup_mnesia/0, disable_plugin/0, go/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
--export([messages_delayed/1]).
+-export([messages_delayed/1,
+         purge_exchange/1]).
 
 %% For testing, debugging and manual use
 -export([refresh_config/0,
@@ -108,6 +109,25 @@ messages_delayed(Exchange) ->
                              delivery  = '_', ref       = '_'},
     Delays = mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], [true]}]),
     length(Delays).
+
+purge_exchange(ExchangeName = #resource{}) ->
+    MatchHead = #delay_index{delay_key = make_key('_', #exchange{name = ExchangeName, _ = '_'}),
+                             _  = '_'},
+    MS = [{MatchHead,
+           [],
+           [{element, #delay_index.delay_key, '$_'}]}],
+    mnesia:async_dirty(
+      fun() ->
+              Result = mnesia:select(?INDEX_TABLE_NAME, MS, 100, write),
+              do_purge_exchange(Result)
+      end).
+
+do_purge_exchange({Matches, Cont}) ->
+    [mnesia:delete(?TABLE_NAME, Key, write) || Key <- Matches],
+    [mnesia:delete(?INDEX_TABLE_NAME, Key, write) || Key <- Matches],
+    do_purge_exchange(mnesia:select(Cont));
+do_purge_exchange('$end_of_table') ->
+    ok.
 
 refresh_config() ->
     gen_server:call(?MODULE, refresh_config).
