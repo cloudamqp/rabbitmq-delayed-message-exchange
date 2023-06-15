@@ -14,7 +14,7 @@ dep_rabbit                     = git_rmq-subfolder rabbitmq-server $(RABBITMQ_VE
 dep_rabbitmq_ct_client_helpers = git_rmq-subfolder rabbitmq-ct-client-helpers $(RABBITMQ_VERSION)
 dep_rabbitmq_ct_helpers        = git_rmq-subfolder rabbitmq-ct-helpers $(RABBITMQ_VERSION)
 
-DEPS = rabbit_common rabbit
+DEPS = rabbit_common rabbit rabbitmq_management
 TEST_DEPS = ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client
 dep_ct_helper = git https://github.com/extend/ct_helper.git master
 
