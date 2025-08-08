@@ -1,5 +1,5 @@
 -define(TABLE_NAME,
-        list_to_atom(atom_to_list(?MODULE) ++ atom_to_list(node()))
+        list_to_atom(atom_to_list(?MODULE) ++ "_" ++ atom_to_list(node()))
        ).
 -define(INDEX_TABLE_NAME,
         list_to_atom(atom_to_list(?TABLE_NAME) ++ "_index")

@@ -6,6 +6,7 @@
          disable_plugin/0,
          select_messages_delayed/1,
          get_messages_delayed/1,
+         get_first_index/0,
          delete_message_delayed/1,
          delete_index_delayed/1,
          put_message_delayed/1,
@@ -20,6 +21,7 @@ setup_schema() ->
   ).
 
 setup_schema_in_mnesia() ->
+    file:write_file("/tmp/out.txt", io_lib:format("Setting up delayed message exchange schema ~p in Mnesia ~p~n", [?TABLE_NAME, erlang:universaltime()]), [append]),
     _ = mnesia:create_table(?TABLE_NAME, [{record_name, delay_entry},
                                           {attributes,
                                            record_info(fields, delay_entry)},
@@ -52,22 +54,18 @@ disable_plugin() ->
                     end}
      ).
 
-select_messages_delayed(Exchange) ->
+select_messages_delayed(Pattern) ->
     rabbit_khepri:handle_fallback(
-        #{mnesia => fun() -> select_messages_delayed_mnesia(Exchange) end,
-          khepri => fun() -> select_messages_delayed_khepri(Exchange) end}
+        #{mnesia => fun() -> select_messages_delayed_mnesia(Pattern) end,
+          khepri => fun() -> select_messages_delayed_khepri(Pattern) end}
     ).
 
-select_messages_delayed_mnesia(Exchange) ->
-    ExchangeName = Exchange#exchange.name,
-    MatchHead = #delay_entry{delay_key = make_key('_', #exchange{name = ExchangeName, _ = '_'}),
-                             delivery  = '_', ref       = '_'},
-    mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], [true]}]).
+select_messages_delayed_mnesia(Pattern) ->
+    mnesia:dirty_select(?TABLE_NAME, [{Pattern, [], [true]}]).
 
-select_messages_delayed_khepri(Exchange) ->
-    ExchangeName = Exchange#exchange.name,
-    Pattern = khepri_messages_path() ++ [{ExchangeName, '_'}, '_'],
-    case rabbit_khepri:get_many(Pattern) of
+select_messages_delayed_khepri(_Pattern) ->
+    Path = khepri_messages_path(),
+    case rabbit_khepri:get_many(Path) of
         {ok, Messages} -> Messages;
         {error, _} -> []
     end.
@@ -117,8 +115,8 @@ get_first_index() ->
 get_first_index_mnesia() ->
     case mnesia:dirty_first(?INDEX_TABLE_NAME) of
         %% destructuring to prevent matching '$end_of_table'
-        #delay_key{timestamp = FirstTS} = Key ->
-            Key
+        #delay_key{} = Key ->
+            Key;
         _ ->
             %% nothing to do
             undefined

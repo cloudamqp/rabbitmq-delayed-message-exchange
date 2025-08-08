@@ -14,33 +14,38 @@
 
 all() ->
     [
-      {group, non_parallel_tests},
-      {group, fine_stats}
+      {group, common_tests},
+      {group, khperi_tests}
     ].
 
 groups() ->
     [
-      {non_parallel_tests, [], [
-                                wrong_exchange_argument_type,
-                                exchange_argument_type_not_self,
-                                routing_topic,
-                                routing_direct,
-                                routing_fanout,
-                                e2e_nodelay,
-                                e2e_delay,
-                                delay_order,
-                                delayed_messages_count,
-                                node_restart_before_delay_expires,
-                                node_restart_after_delay_expires,
-                                no_message_for_index,
-                                string_delay_header
-                               ]},
-     {fine_stats, [], [
-                       e2e_nodelay,
-                       e2e_delay
-                      ]}
+      {khperi_tests, [], [{group, common_tests}]},
+      {common_tests, [], [non_parallel_tests_group(), fine_stats_group()]}
     ].
 
+non_parallel_tests_group() ->
+    {non_parallel_tests, [], [
+                              wrong_exchange_argument_type,
+                              exchange_argument_type_not_self,
+                              routing_topic,
+                              routing_direct,
+                              routing_fanout,
+                              e2e_nodelay,
+                              e2e_delay,
+                              delay_order,
+                              delayed_messages_count,
+                              node_restart_before_delay_expires,
+                              node_restart_after_delay_expires,
+                              no_message_for_index,
+                              string_delay_header
+                             ]}.
+
+fine_stats_group() ->
+    {fine_stats, [], [
+                      e2e_nodelay,
+                      e2e_delay
+                     ]}.
 
 %% -------------------------------------------------------------------
 %% Setup/teardown.
@@ -48,6 +53,35 @@ groups() ->
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
+    Config.
+
+end_per_suite(Config) ->
+    Config.
+
+% Set up a node for the common_tests ...
+init_per_group(common_tests, Config0) ->
+    case proplists:get_value(tc_group_path, Config0) of
+        % ... but not if they are running as part of the khepri_tests group...
+        [[{name, common_tests}, {name, khepri_tests}]] ->
+            Config0;
+        _ ->
+            setup_node(Config0)
+    end;
+% ... because we are already starting a node for the khepri_tests group.
+init_per_group(khepri_tests, Config0) ->
+    setup_node(Config0);
+
+init_per_group(fine_stats, Config) ->
+    ct:pal("Config : ~p~n", [Config]),
+    CollectStatsOrig = get_collect_stats(Config),
+    set_collect_stats(Config, fine),
+    refresh_config(Config),
+    [{collect_statistics, fine}, {collect_statistics_orig, CollectStatsOrig}|Config];
+init_per_group(G, Config) ->
+    ct:pal("Group: ~p~n", [G]),
+    Config.
+
+setup_node(Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [
         {rmq_nodename_suffix, ?MODULE}
       ]),
@@ -55,18 +89,18 @@ init_per_suite(Config) ->
       rabbit_ct_broker_helpers:setup_steps() ++
       rabbit_ct_client_helpers:setup_steps()).
 
-end_per_suite(Config) ->
-    rabbit_ct_helpers:run_teardown_steps(Config,
-      rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()).
-
-init_per_group(fine_stats, Config) ->
-    CollectStatsOrig = get_collect_stats(Config),
-    set_collect_stats(Config, fine),
-    refresh_config(Config),
-    [{collect_statistics, fine}, {collect_statistics_orig, CollectStatsOrig}|Config];
-init_per_group(_, Config) ->
-    Config.
+% Same as init per group, stop the node for the common_tests group ...
+end_per_group(common_tests, Config0) ->
+    case proplists:get_value(tc_group_path, Config0) of
+        % ... but not if they are running as part of the khepri_tests group...
+        [[{name, common_tests}, {name, khepri_tests}]] ->
+            Config0;
+        _ ->
+            teardown_node(Config0)
+    end;
+% ... because we are already stopping a node for the khepri_tests group.
+end_per_group(khepri_tests, Config0) ->
+    teardown_node(Config0);
 
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
@@ -75,6 +109,11 @@ end_per_group(fine_stats, Config) ->
     Config;
 end_per_group(_, Config) ->
     Config.
+
+teardown_node(Config) ->
+    rabbit_ct_helpers:run_teardown_steps(Config,
+      rabbit_ct_client_helpers:teardown_steps() ++
+      rabbit_ct_broker_helpers:teardown_steps()).
 
 init_per_testcase(Testcase, Config) ->
     TestCaseName = rabbit_ct_helpers:config_to_testcase_name(Config, Testcase),
@@ -512,8 +551,9 @@ refresh_config(Config) ->
     ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, refresh_config, []).
 
 make_table_corrupted(Config) ->
+    ct:pal("Config: ~p~n", [Config]),
     Table = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, table_name, []),
     IndexTable = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, index_table_name, []),
-
+    ct:pal("Table: ~p, IndexTable: ~p~n", [Table, IndexTable]),
     FirstKey = rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_first, [IndexTable]),
     rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_delete, [Table, FirstKey]).

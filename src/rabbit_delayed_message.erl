@@ -76,7 +76,13 @@ disable_plugin() ->
     rabbit_db_delayed_message_exchange:disable_plugin().
 
 messages_delayed(Exchange) ->
-    Delays = rabbit_db_delayed_message_exchange:select_messages_delayed(Exchange),
+    ExchangeName = Exchange#exchange.name,
+    Pattern = #delay_entry{delay_key = make_key('_',
+                                                #exchange{name = ExchangeName,
+                                                          _ = '_'}),
+                           delivery = '_',
+                           ref = '_'},
+    Delays = rabbit_db_delayed_message_exchange:select_messages_delayed(Pattern),
     length(Delays).
 
 refresh_config() ->
