@@ -21,7 +21,6 @@ setup_schema() ->
   ).
 
 setup_schema_in_mnesia() ->
-    file:write_file("/tmp/out.txt", io_lib:format("Setting up delayed message exchange schema ~p in Mnesia ~p~n", [?TABLE_NAME, erlang:universaltime()]), [append]),
     _ = mnesia:create_table(?TABLE_NAME, [{record_name, delay_entry},
                                           {attributes,
                                            record_info(fields, delay_entry)},

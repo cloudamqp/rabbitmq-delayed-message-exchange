@@ -113,7 +113,7 @@ handle_cast(_C, State) ->
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
     case rabbit_db_delayed_message_exchange:get_messages_delayed(Key) of
         [] ->
-            rabbit_db_delayed_message_exchange:delete_indexes_delayed(Key);
+            rabbit_db_delayed_message_exchange:delete_index_delayed(Key);
         Deliveries ->
             _ = route(Key, Deliveries, State),
             rabbit_db_delayed_message_exchange:delete_message_delayed(Key),
