@@ -15,12 +15,12 @@
 all() ->
     [
       {group, common_tests},
-      {group, khperi_tests}
+      {group, khepri_tests}
     ].
 
 groups() ->
     [
-      {khperi_tests, [], [{group, common_tests}]},
+      {khepri_tests, [], [{group, common_tests}]},
       {common_tests, [], [non_parallel_tests_group(), fine_stats_group()]}
     ].
 
@@ -62,14 +62,19 @@ end_per_suite(Config) ->
 init_per_group(common_tests, Config0) ->
     case proplists:get_value(tc_group_path, Config0) of
         % ... but not if they are running as part of the khepri_tests group...
-        [[{name, common_tests}, {name, khepri_tests}]] ->
-            Config0;
+        [[{name, khepri_tests}]] ->
+            ct:pal("Matching path ~p~n", [Config0]),
+            rabbit_ct_helpers:set_config(Config0, [{metadata_store, khepri}]);
         _ ->
+            ct:pal("No matching path: ~p", [Config0]),
             setup_node(Config0)
     end;
 % ... because we are already starting a node for the khepri_tests group.
 init_per_group(khepri_tests, Config0) ->
-    setup_node(Config0);
+    %Config1 = rabbit_ct_helpers:set_config(Config0, [{metadata_store, khepri}]),
+    Config = setup_node(Config0),
+    ok = enable_khepri(Config),
+    Config;
 
 init_per_group(fine_stats, Config) ->
     ct:pal("Config : ~p~n", [Config]),
@@ -100,6 +105,7 @@ end_per_group(common_tests, Config0) ->
     end;
 % ... because we are already stopping a node for the khepri_tests group.
 end_per_group(khepri_tests, Config0) ->
+    ct:pal("End per group khepri_tests~n"),
     teardown_node(Config0);
 
 end_per_group(fine_stats, Config) ->
@@ -188,7 +194,7 @@ routing_test0(Config, BKs, RKs, ExType, Count) ->
     % ensure that the messages have been delivered to the queues
     % before asking for the message count
     amqp_channel:wait_for_confirms_or_die(Chan),
-
+    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_log, critical, ["Im here"]),
     #'queue.declare_ok'{message_count = MCount} =
         amqp_channel:call(Chan, make_queue(Q)),
 
@@ -557,3 +563,6 @@ make_table_corrupted(Config) ->
     ct:pal("Table: ~p, IndexTable: ~p~n", [Table, IndexTable]),
     FirstKey = rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_first, [IndexTable]),
     rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_delete, [Table, FirstKey]).
+
+enable_khepri(Config) ->
+    rabbit_ct_broker_helpers:enable_feature_flag(Config, khepri_db).

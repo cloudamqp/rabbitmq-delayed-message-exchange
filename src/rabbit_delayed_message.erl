@@ -96,6 +96,7 @@ init([]) ->
 
 handle_call({delay_message, Exchange, Message, Delay},
             _From, State = #state{timer = CurrTimer}) ->
+    rabbit_log:critical("A new message", []),
     Reply = {ok, NewTimer} = internal_delay_message(CurrTimer, Exchange, Message, Delay),
     State2 = State#state{timer = NewTimer},
     {reply, Reply, State2};

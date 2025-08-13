@@ -65,7 +65,7 @@ select_messages_delayed_mnesia(Pattern) ->
 select_messages_delayed_khepri(_Pattern) ->
     Path = khepri_messages_path(),
     case rabbit_khepri:get_many(Path) of
-        {ok, Messages} -> Messages;
+        {ok, Messages} -> maps:to_list(Messages);
         {error, _} -> []
     end.
 
@@ -131,7 +131,7 @@ get_first_index_khepri() ->
                                              #delay_key{timestamp = TS2}
                                             ) ->
                                                  TS1 =< TS2
-                                         end, IndexEntries),
+                                         end, maps:values(IndexEntries)),
               case SortedEntries of
                   [FirstKey | _] ->
                       FirstKey;
