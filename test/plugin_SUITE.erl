@@ -33,7 +33,8 @@ groups() ->
                                 node_restart_before_delay_expires,
                                 node_restart_after_delay_expires,
                                 no_message_for_index,
-                                string_delay_header
+                                string_delay_header,
+                                plugin_disable_enable_during_publish
                                ]},
      {fine_stats, [], [
                        e2e_nodelay,
@@ -377,6 +378,67 @@ string_delay_header(Config) ->
 
     ok.
 
+plugin_disable_enable_during_publish(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    %% Spawn a process that continuously publishes messages
+    Parent = self(),
+    PublisherPid = spawn_link(fun() ->
+        continuous_publisher(Chan, Ex, Parent, 0)
+    end),
+
+    %% Wait for some messages to be published
+    timer:sleep(1000),
+
+    %% Get crash count before plugin operations
+    NodeConfig = rabbit_ct_broker_helpers:get_node_config(Config, 0),
+    CrashCountBefore = count_crashes_in_node_logs(NodeConfig),
+
+    %% Disable the plugin
+    ok = rabbit_ct_broker_helpers:disable_plugin(Config, 0,
+        rabbitmq_delayed_message_exchange),
+
+    %% Let publisher continue during disabled state
+    timer:sleep(1000),
+
+    %% Enable the plugin
+    ok = rabbit_ct_broker_helpers:enable_plugin(Config, 0,
+        rabbitmq_delayed_message_exchange),
+
+    %% Let the plugin stabilize and publisher continue
+    timer:sleep(1000),
+
+    %% Stop the publisher
+    PublisherPid ! stop,
+    timer:sleep(100),
+
+    %% Verify rabbit_delayed_message process is alive on the remote node
+    Pid = rabbit_ct_broker_helpers:rpc(Config, 0,
+        erlang, whereis, [rabbit_delayed_message]),
+    ?assertMatch(P when is_pid(P), Pid),
+
+    IsAlive = rabbit_ct_broker_helpers:rpc(Config, 0,
+        erlang, is_process_alive, [Pid]),
+    ?assert(IsAlive),
+
+    %% Check that no new crashes occurred in the logs
+    NodeConfigAfter = rabbit_ct_broker_helpers:get_node_config(Config, 0),
+    CrashCountAfter = count_crashes_in_node_logs(NodeConfigAfter),
+    ?assertEqual(CrashCountBefore, CrashCountAfter),
+
+    %% Cleanup
+    amqp_channel:call(Chan, #'exchange.delete' { exchange = Ex }),
+    amqp_channel:call(Chan, #'queue.delete' { queue = Q }),
+    rabbit_ct_client_helpers:close_channel(Chan),
+
+    ok.
+
 setup_fabric(Chan, ExDeclare, QueueDeclare) ->
     setup_fabric(Chan, ExDeclare, QueueDeclare, <<>>).
 
@@ -517,3 +579,46 @@ make_table_corrupted(Config) ->
 
     FirstKey = rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_first, [IndexTable]),
     rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_delete, [Table, FirstKey]).
+
+continuous_publisher(Chan, Ex, Parent, Count) ->
+    receive
+        stop -> ok
+    after 50 ->
+        %% Try to publish a message with a short delay
+        try
+            Msg = make_msg(signedint, 500),
+            amqp_channel:call(Chan,
+                #'basic.publish'{exchange = Ex, routing_key = <<>>},
+                Msg),
+            continuous_publisher(Chan, Ex, Parent, Count + 1)
+        catch
+            _:_ ->
+                %% Ignore publish errors during plugin disable/enable
+                %% and continue publishing
+                timer:sleep(50),
+                continuous_publisher(Chan, Ex, Parent, Count)
+        end
+    end.
+
+count_crashes_in_node_logs(NodeConfig) ->
+    LogLocations = rabbit_ct_helpers:get_config(NodeConfig, log_locations, []),
+    lists:foldl(
+        fun(LogLocation, Total) ->
+            Count = count_crashes_in_log(LogLocation),
+            Total + Count
+        end, 0, LogLocations).
+
+count_crashes_in_log(LogLocation) ->
+    case file:read_file(LogLocation) of
+        {ok, Content} ->
+            %% Look for gen_server termination messages in the log
+            ReOpts = [multiline, global],
+            case re:run(Content,
+                       "\\*\\* Generic server .+ terminating",
+                       ReOpts) of
+                {match, Matches} -> length(Matches);
+                nomatch -> 0
+            end;
+        _ ->
+            0
+    end.
