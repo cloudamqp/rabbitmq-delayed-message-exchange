@@ -14,33 +14,36 @@
 
 all() ->
     [
-      {group, non_parallel_tests},
+      {group, metadata_store_mnesia},
+      {group, metadata_store_khepri},
       {group, fine_stats}
     ].
 
 groups() ->
     [
-      {non_parallel_tests, [], [
-                                wrong_exchange_argument_type,
-                                exchange_argument_type_not_self,
-                                routing_topic,
-                                routing_direct,
-                                routing_fanout,
-                                e2e_nodelay,
-                                e2e_delay,
-                                delay_order,
-                                delayed_messages_count,
-                                node_restart_before_delay_expires,
-                                node_restart_after_delay_expires,
-                                no_message_for_index,
-                                string_delay_header
-                               ]},
+     {metadata_store_mnesia, [], test_cases()},
+     {metadata_store_khepri, [], test_cases()},
      {fine_stats, [], [
                        e2e_nodelay,
                        e2e_delay
                       ]}
     ].
 
+test_cases() ->
+    [wrong_exchange_argument_type,
+     exchange_argument_type_not_self,
+     routing_topic,
+     routing_direct,
+     routing_fanout,
+     e2e_nodelay,
+     e2e_delay,
+     delay_order,
+     delayed_messages_count,
+     node_restart_before_delay_expires,
+     node_restart_after_delay_expires,
+     no_message_for_index,
+     string_delay_header
+    ].
 
 %% -------------------------------------------------------------------
 %% Setup/teardown.
@@ -48,33 +51,53 @@ groups() ->
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
+    Config.
+
+end_per_suite(Config) ->
+    Config.
+
+init_per_group(metadata_store_mnesia, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [
-        {rmq_nodename_suffix, ?MODULE}
+        {rmq_nodename_suffix, ?MODULE},
+        {metadata_store, mnesia}
       ]),
     rabbit_ct_helpers:run_setup_steps(Config1,
       rabbit_ct_broker_helpers:setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps()).
-
-end_per_suite(Config) ->
-    rabbit_ct_helpers:run_teardown_steps(Config,
-      rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()).
-
+      rabbit_ct_client_helpers:setup_steps());
+init_per_group(metadata_store_khepri, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(Config, [
+        {rmq_nodename_suffix, ?MODULE},
+        {metadata_store, khepri}
+      ]),
+    rabbit_ct_helpers:run_setup_steps(Config1,
+      rabbit_ct_broker_helpers:setup_steps() ++
+      rabbit_ct_client_helpers:setup_steps());
 init_per_group(fine_stats, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(Config, [
+        {rmq_nodename_suffix, ?MODULE},
+        {metadata_store, mnesia}
+      ]),
+    rabbit_ct_helpers:run_setup_steps(Config1,
+      rabbit_ct_broker_helpers:setup_steps() ++
+      rabbit_ct_client_helpers:setup_steps()),
+
     CollectStatsOrig = get_collect_stats(Config),
     set_collect_stats(Config, fine),
     refresh_config(Config),
-    [{collect_statistics, fine}, {collect_statistics_orig, CollectStatsOrig}|Config];
-init_per_group(_, Config) ->
-    Config.
+    [{collect_statistics, fine}, {collect_statistics_orig, CollectStatsOrig}|Config].
 
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
     set_collect_stats(Config, CollectStatsOrig),
     refresh_config(Config),
-    Config;
+
+    rabbit_ct_helpers:run_teardown_steps(Config,
+      rabbit_ct_client_helpers:teardown_steps() ++
+      rabbit_ct_broker_helpers:teardown_steps());
 end_per_group(_, Config) ->
-    Config.
+    rabbit_ct_helpers:run_teardown_steps(Config,
+      rabbit_ct_client_helpers:teardown_steps() ++
+      rabbit_ct_broker_helpers:teardown_steps()).
 
 init_per_testcase(Testcase, Config) ->
     TestCaseName = rabbit_ct_helpers:config_to_testcase_name(Config, Testcase),
