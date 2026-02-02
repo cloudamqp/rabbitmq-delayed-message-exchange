@@ -162,13 +162,44 @@ handle_cast(_C, State) ->
     {noreply, State}.
 
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
-    case mnesia:dirty_read(?TABLE_NAME, Key) of
-        [] ->
-            mnesia:dirty_delete(?INDEX_TABLE_NAME, Key);
-        Deliveries ->
-            _ = route(Key, Deliveries, State),
-            mnesia:dirty_delete(?TABLE_NAME, Key),
-            mnesia:dirty_delete(?INDEX_TABLE_NAME, Key)
+    try
+        case mnesia:dirty_read(?TABLE_NAME, Key) of
+            [] ->
+                catch mnesia:dirty_delete(?INDEX_TABLE_NAME, Key);
+            Deliveries ->
+                try
+                    _ = route(Key, Deliveries, State),
+                    catch mnesia:dirty_delete(?TABLE_NAME, Key),
+                    catch mnesia:dirty_delete(?INDEX_TABLE_NAME, Key)
+                catch
+                    error:{badmatch, {error, {exchange_type_not_found, _}}} ->
+                        %% Exchange type no longer exists (plugin disabled?)
+                        %% Clean up the delayed messages and continue
+                        rabbit_log:warning("Delayed message exchange type not found, "
+                                           "cleaning up delayed messages for key ~p", [Key]),
+                        catch mnesia:dirty_delete(?TABLE_NAME, Key),
+                        catch mnesia:dirty_delete(?INDEX_TABLE_NAME, Key);
+                    error:function_clause ->
+                        %% Exchange type validation failed (plugin disabled?)
+                        rabbit_log:warning("Failed to route delayed message (exchange type unavailable?), "
+                                           "cleaning up delayed messages for key ~p", [Key]),
+                        catch mnesia:dirty_delete(?TABLE_NAME, Key),
+                        catch mnesia:dirty_delete(?INDEX_TABLE_NAME, Key);
+                    Class:Reason:Stacktrace ->
+                        %% Log any other unexpected errors but don't crash
+                        rabbit_log:error("Error delivering delayed message for key ~p: ~p:~p~n~p",
+                                         [Key, Class, Reason, Stacktrace]),
+                        catch mnesia:dirty_delete(?TABLE_NAME, Key),
+                        catch mnesia:dirty_delete(?INDEX_TABLE_NAME, Key)
+                end
+        end
+    catch
+        exit:{aborted, {no_exists, _}} ->
+            %% Tables deleted (plugin disabled), nothing to clean up
+            ok;
+        _:_ ->
+            %% Ignore other errors during table access
+            ok
     end,
     {noreply, State#state{timer = maybe_delay_first()}};
 handle_info(_I, State) ->
@@ -182,14 +213,23 @@ code_change(_, State, _) -> {ok, State}.
 %%--------------------------------------------------------------------
 
 maybe_delay_first() ->
-    case mnesia:dirty_first(?INDEX_TABLE_NAME) of
-        %% destructuring to prevent matching '$end_of_table'
-        #delay_key{timestamp = FirstTS} = Key2 ->
-            %% there are messages that will expire and need to be delivered
-            Now = erlang:system_time(milli_seconds),
-            start_timer(FirstTS - Now, Key2);
-        _ ->
-            %% nothing to do
+    try
+        case mnesia:dirty_first(?INDEX_TABLE_NAME) of
+            %% destructuring to prevent matching '$end_of_table'
+            #delay_key{timestamp = FirstTS} = Key2 ->
+                %% there are messages that will expire and need to be delivered
+                Now = erlang:system_time(milli_seconds),
+                start_timer(FirstTS - Now, Key2);
+            _ ->
+                %% nothing to do
+                not_set
+        end
+    catch
+        exit:{aborted, {no_exists, _}} ->
+            %% Table was deleted (plugin disabled), no timer needed
+            not_set;
+        _:_ ->
+            %% Any other error, just don't set a timer
             not_set
     end.
 
