@@ -390,7 +390,7 @@ plugin_disable_enable_during_publish(Config) ->
     %% Spawn a process that continuously publishes messages
     Parent = self(),
     PublisherPid = spawn_link(fun() ->
-        continuous_publisher(Chan, Ex, Parent, 0)
+        continuous_publisher(Config, Chan, Ex, Parent, 0)
     end),
 
     %% Wait for some messages to be published
@@ -433,9 +433,10 @@ plugin_disable_enable_during_publish(Config) ->
     ?assertEqual(CrashCountBefore, CrashCountAfter),
 
     %% Cleanup
-    amqp_channel:call(Chan, #'exchange.delete' { exchange = Ex }),
-    amqp_channel:call(Chan, #'queue.delete' { queue = Q }),
-    rabbit_ct_client_helpers:close_channel(Chan),
+    %% Note: Channel may be dead after plugin disable/enable cycle
+    catch amqp_channel:call(Chan, #'exchange.delete' { exchange = Ex }),
+    catch amqp_channel:call(Chan, #'queue.delete' { queue = Q }),
+    catch rabbit_ct_client_helpers:close_channel(Chan),
 
     ok.
 
@@ -580,9 +581,11 @@ make_table_corrupted(Config) ->
     FirstKey = rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_first, [IndexTable]),
     rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_delete, [Table, FirstKey]).
 
-continuous_publisher(Chan, Ex, Parent, Count) ->
+continuous_publisher(Config, Chan, Ex, Parent, Count) ->
     receive
-        stop -> ok
+        stop ->
+            catch rabbit_ct_client_helpers:close_channel(Chan),
+            ok
     after 50 ->
         %% Try to publish a message with a short delay
         try
@@ -590,13 +593,19 @@ continuous_publisher(Chan, Ex, Parent, Count) ->
             amqp_channel:call(Chan,
                 #'basic.publish'{exchange = Ex, routing_key = <<>>},
                 Msg),
-            continuous_publisher(Chan, Ex, Parent, Count + 1)
+            continuous_publisher(Config, Chan, Ex, Parent, Count + 1)
         catch
+            exit:{{shutdown, {connection_closing, {server_initiated_close, _, _}}}, _} ->
+                %% Channel closed due to error (e.g., exchange type not found)
+                %% Reopen channel and continue publishing
+                timer:sleep(100),
+                NewChan = rabbit_ct_client_helpers:open_channel(Config),
+                continuous_publisher(Config, NewChan, Ex, Parent, Count);
             _:_ ->
-                %% Ignore publish errors during plugin disable/enable
-                %% and continue publishing
+                %% Other publish errors during plugin disable/enable
+                %% Just retry with same channel
                 timer:sleep(50),
-                continuous_publisher(Chan, Ex, Parent, Count)
+                continuous_publisher(Config, Chan, Ex, Parent, Count)
         end
     end.
 
