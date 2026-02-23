@@ -14,8 +14,15 @@ dep_rabbit_common              = git_rmq-subfolder rabbitmq-common $(RABBITMQ_VE
 dep_rabbit                     = git_rmq-subfolder rabbitmq-server $(RABBITMQ_VERSION)
 dep_rabbitmq_ct_client_helpers = git_rmq-subfolder rabbitmq-ct-client-helpers $(RABBITMQ_VERSION)
 dep_rabbitmq_ct_helpers        = git_rmq-subfolder rabbitmq-ct-helpers $(RABBITMQ_VERSION)
+dep_leveled                = git https://github.com/martinsumner/leveled.git develop-3.4
+dep_lz4                    = git https://github.com/OpenRiak/erlang-lz4.git openriak-3.4
+dep_zstd                   = git https://github.com/OpenRiak/zstd-erlang.git openriak-3.2
 
-DEPS = rabbit_common rabbit
+# leveled_codec.erl calls lz4 and zstd functions directly, so both NIF libs
+# must be declared here so they end up in the top-level deps/ and code path.
+# eqwalizer_support is a type-checking tool; suppress it across all sub-builds.
+DEPS = rabbit_common rabbit leveled lz4 zstd
+export IGNORE_DEPS += eqwalizer_support
 TEST_DEPS = ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client
 dep_ct_helper = git https://github.com/extend/ct_helper.git master
 
