@@ -5,136 +5,46 @@
 %%  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
-%% NOTE that this module uses os:timestamp/0 but in the future Erlang
-%% will have a new time API.
-%% See:
-%% https://www.erlang.org/documentation/doc-7.0-rc1/erts-7.0/doc/html/erlang.html#now-0
-%% and
-%% https://www.erlang.org/documentation/doc-7.0-rc1/erts-7.0/doc/html/time_correction.html
-
 -module(rabbit_delayed_message).
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("kernel/include/logger.hrl").
 
--rabbit_boot_step({?MODULE,
-                   [{description, "exchange delayed message mnesia setup"},
-                    {mfa, {?MODULE, setup_mnesia, []}},
-                    {cleanup, {?MODULE, disable_plugin, []}},
-                    {requires, pre_flight}]}).
-
 -behaviour(gen_server).
 
--export([start_link/0, delay_message/3, setup_mnesia/0, disable_plugin/0, go/0]).
+-export([start_link/0, delay_message/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
 -export([messages_delayed/1]).
 
 %% For testing, debugging and manual use
--export([refresh_config/0,
-         table_name/0,
-         index_table_name/0]).
+-export([refresh_config/0]).
 
 -import(rabbit_delayed_message_utils, [swap_delay_header/1]).
 
--type t_reference() :: reference().
--type delay() :: non_neg_integer().
+%% ?STD_TAG from leveled.hrl
+-define(STD_TAG, o).
 
-
--spec delay_message(rabbit_types:exchange(),
-                    mc:state(),
-                    delay()) ->
-                           nodelay | {ok, t_reference()}.
-
--spec internal_delay_message(t_reference(),
-                             rabbit_types:exchange(),
-                             mc:state(),
-                             delay()) ->
-                                    nodelay | {ok, t_reference()}.
-
--define(TABLE_NAME, append_to_atom(?MODULE, node())).
--define(INDEX_TABLE_NAME, append_to_atom(?TABLE_NAME, "_index")).
+%% All delayed messages share a single bucket. Keys are <<TS:64/big, Random:16/binary>>
+%% so they sort globally by delivery timestamp. The exchange name is stored inside
+%% the value, allowing a single range scan at timer expiry to collect all due messages
+%% regardless of which exchange they belong to.
+-define(BUCKET, <<"x-delayed-messages">>).
 
 -record(state, {timer,
+                bookie      :: pid(),
                 stats_state}).
-
--record(delay_key,
-        { timestamp, %% timestamp delay
-          exchange   %% rabbit_types:exchange()
-        }).
-
--record(delay_entry,
-        { delay_key, %% delay_key record
-          delivery,  %% the message delivery
-          ref        %% ref to make records distinct for 'bag' semantics.
-        }).
-
--record(delay_index,
-        { delay_key, %% delay_key record
-          const      %% record must have two fields
-        }).
 
 %%--------------------------------------------------------------------
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-go() ->
-    gen_server:cast(?MODULE, go).
-
 delay_message(Exchange, Message, Delay) ->
     gen_server:call(?MODULE, {delay_message, Exchange, Message, Delay},
                     infinity).
 
-setup_mnesia() ->
-    case rabbit_khepri:is_enabled() of
-        true ->
-            ensure_mnesia_running();
-        false ->
-            %% Mnesia should already be running
-            ok
-    end,
-    _ = mnesia:create_table(?TABLE_NAME, [{record_name, delay_entry},
-                                          {attributes,
-                                           record_info(fields, delay_entry)},
-                                          {type, bag},
-                                          {disc_copies, [node()]}]),
-    _ = mnesia:create_table(?INDEX_TABLE_NAME, [{record_name, delay_index},
-                                                {attributes,
-                                                 record_info(fields, delay_index)},
-                                                {type, ordered_set},
-                                                {disc_copies, [node()]}]),
-    rabbit_table:wait([?TABLE_NAME, ?INDEX_TABLE_NAME]).
-
-ensure_mnesia_running() ->
-    case rabbit_mnesia:is_running() of
-        false ->
-            ensure_mnesia_disc_schema(),
-            rabbit_mnesia:start_mnesia(_CheckConsistency = false);
-        true ->
-            ok
-    end.
-
-ensure_mnesia_disc_schema() ->
-    case mnesia:system_info(use_dir) of
-        true ->
-            %% There is a disc schema already
-            ok;
-        false ->
-            rabbit_misc:ensure_ok(mnesia:create_schema([node()]),
-                                  {?MODULE, cannot_create_mnesia_schema})
-    end.
-
-disable_plugin() ->
-    _ = mnesia:delete_table(?INDEX_TABLE_NAME),
-    _ = mnesia:delete_table(?TABLE_NAME),
-    ok.
-
 messages_delayed(Exchange) ->
-    ExchangeName = Exchange#exchange.name,
-    MatchHead = #delay_entry{delay_key = make_key('_', #exchange{name = ExchangeName, _ = '_'}),
-                             delivery  = '_', ref       = '_'},
-    Delays = mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], [true]}]),
-    length(Delays).
+    gen_server:call(?MODULE, {messages_delayed, Exchange}, infinity).
 
 refresh_config() ->
     gen_server:call(?MODULE, refresh_config).
@@ -142,152 +52,141 @@ refresh_config() ->
 %%--------------------------------------------------------------------
 
 init([]) ->
-    _ = recover(),
-    {ok, #state{timer = not_set}}.
+    Path = filename:join([rabbit_mnesia:dir(), "rabbit_delayed_message", "leveled"]),
+    ok = filelib:ensure_path(Path),
+    {ok, Bookie} = leveled_bookie:book_start([{root_path, Path}]),
+    State = rabbit_event:init_stats_timer(
+        #state{timer = not_set, bookie = Bookie}, #state.stats_state),
+    {ok, State#state{timer = maybe_delay_first(Bookie)}}.
 
 handle_call({delay_message, Exchange, Message, Delay},
-            _From, State = #state{timer = CurrTimer}) ->
-    Reply = {ok, NewTimer} = internal_delay_message(CurrTimer, Exchange, Message, Delay),
-    State2 = State#state{timer = NewTimer},
-    {reply, Reply, State2};
+            _From,
+            State) ->
+    NewTimer = internal_delay_message(State, Exchange, Message, Delay),
+    {reply, {ok, NewTimer}, State#state{timer = NewTimer}};
+handle_call({messages_delayed, Exchange},
+            _From,
+            State = #state{bookie = Bookie}) ->
+    Count = count_messages_for_exchange(Bookie, Exchange#exchange.name),
+    {reply, Count, State};
 handle_call(refresh_config, _From, State) ->
     {reply, ok, refresh_config(State)};
 handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
-handle_cast(go, State) ->
-    State2 = refresh_config(State),
-    {noreply, State2#state{timer = maybe_delay_first()}};
 handle_cast(_C, State) ->
     {noreply, State}.
 
-handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
-    case mnesia:dirty_read(?TABLE_NAME, Key) of
-        [] ->
-            mnesia:dirty_delete(?INDEX_TABLE_NAME, Key);
-        Deliveries ->
-            _ = route(Key, Deliveries, State),
-            mnesia:dirty_delete(?TABLE_NAME, Key),
-            mnesia:dirty_delete(?INDEX_TABLE_NAME, Key)
-    end,
-    {noreply, State#state{timer = maybe_delay_first()}};
+handle_info({timeout, _TimerRef, {deliver, DeliveryTS}},
+            State = #state{bookie = Bookie}) ->
+    ExNameAndMsgs = fetch_and_delete(Bookie, DeliveryTS),
+    _ = route_all(ExNameAndMsgs, State),
+    {noreply, State#state{timer = maybe_delay_first(Bookie)}};
 handle_info(_I, State) ->
     {noreply, State}.
 
-terminate(_, _) ->
-    ok.
+terminate(_, #state{bookie = Bookie}) ->
+    leveled_bookie:book_close(Bookie).
 
 code_change(_, State, _) -> {ok, State}.
 
 %%--------------------------------------------------------------------
 
-maybe_delay_first() ->
-    case mnesia:dirty_first(?INDEX_TABLE_NAME) of
-        %% destructuring to prevent matching '$end_of_table'
-        #delay_key{timestamp = FirstTS} = Key2 ->
-            %% there are messages that will expire and need to be delivered
-            Now = erlang:system_time(milli_seconds),
-            start_timer(FirstTS - Now, Key2);
-        _ ->
-            %% nothing to do
-            not_set
+maybe_delay_first(Bookie) ->
+    Now = erlang:system_time(milli_seconds),
+    case first_timestamp(Bookie) of
+        not_found -> not_set;
+        {ok, TS}  -> start_timer(TS - Now, TS)
     end.
 
-route(#delay_key{exchange = Ex}, Deliveries, State) ->
-    ExName = Ex#exchange.name,
-    lists:map(fun (#delay_entry{delivery = Msg0}) ->
-                      Msg1 = case Msg0 of
-                               #delivery{message = BasicMessage} ->
-                                     BasicMessage;
-                               _MC ->
-                                   Msg0
-                           end,
-                      Msg2 = swap_delay_header(Msg1),
-                      Dests = rabbit_exchange:route(Ex, Msg2),
-                      Qs = rabbit_db_queue:get_targets(Dests),
-                      _ = rabbit_queue_type:deliver(Qs, Msg2, #{}, stateless),
-                      bump_routed_stats(ExName, Qs, State)
-              end, Deliveries).
+%% Returns {ok, EarliestTS} for the earliest pending delivery timestamp,
+%% or not_found if the store is empty.
+%%
+%% Keys are stored as <<TS:64/big, Random:16/binary>> and leveled iterates
+%% within a bucket in lexicographic (ascending) order, so the first key
+%% carries the minimum timestamp.
+first_timestamp(Bookie) ->
+    FoldFun = fun(_B, K, _Acc) -> throw({first_key, K}) end,
+    {async, Runner} = leveled_bookie:book_keylist(
+        Bookie, ?STD_TAG, ?BUCKET, {FoldFun, not_found}),
+    try Runner() of
+        not_found -> not_found
+    catch
+        throw:{first_key, <<TS:64/big, _/binary>>} -> {ok, TS}
+    end.
 
-internal_delay_message(CurrTimer, Exchange, Message, Delay) ->
+route_all(ExNameAndMsgs, State) ->
+    lists:map(fun({ExName, Msg0}) ->
+        case rabbit_db_exchange:get(ExName) of
+            {ok, Exchange} ->
+                Msg1 = swap_delay_header(Msg0),
+                Dests = rabbit_exchange:route(Exchange, Msg1),
+                Qs = rabbit_db_queue:get_targets(Dests),
+                _ = rabbit_queue_type:deliver(Qs, Msg1, #{}, stateless),
+                bump_routed_stats(ExName, Qs, State);
+            _ ->
+                ok
+        end
+    end, ExNameAndMsgs).
+
+internal_delay_message(#state{bookie = Bookie, timer = CurrTimer},
+                       Exchange, Message, Delay) ->
     Now = erlang:system_time(milli_seconds),
-    %% keys are timestamps in milliseconds,in the future
     DelayTS = Now + Delay,
-    mnesia:dirty_write(?INDEX_TABLE_NAME,
-                       make_index(DelayTS, Exchange)),
-    mnesia:dirty_write(?TABLE_NAME,
-                       make_delay(DelayTS, Exchange, Message)),
+    ExName = Exchange#exchange.name,
+    _ = leveled_bookie:book_put(Bookie, ?BUCKET, make_db_key(DelayTS),
+                                term_to_binary({ExName, Message}), []),
     case CurrTimer of
         not_set ->
-            %% No timer in progress, so we start our own.
-            {ok, maybe_delay_first()};
+            %% No timer running, scan to find the global earliest.
+            maybe_delay_first(Bookie);
         _ ->
             case erlang:read_timer(CurrTimer) of
                 false ->
-                    %% Timer is already expired.  Handler will be invoked soon.
-                    {ok, CurrTimer};
+                    %% Timer already fired, handler will be called soon.
+                    CurrTimer;
                 CurrMS when Delay < CurrMS ->
-                    %% Current timer lasts longer that new message delay
+                    %% New message fires sooner than the running timer.
                     _ = erlang:cancel_timer(CurrTimer),
-                    {ok, start_timer(Delay, make_key(DelayTS, Exchange))};
+                    start_timer(Delay, DelayTS);
                 _ ->
-                    %% Timer is set to expire sooner than this
-                    %% message's scheduled delivery time.
-                    {ok, CurrTimer}
+                    %% Running timer fires sooner, leave it alone.
+                    CurrTimer
             end
     end.
 
-%% Key will be used upon message receipt to fetch
-%% the deliveries from the database
-start_timer(Delay, Key) ->
-    erlang:start_timer(erlang:max(0, Delay), self(), {deliver, Key}).
+start_timer(Delay, DeliveryTS) ->
+    erlang:start_timer(erlang:max(0, Delay), self(), {deliver, DeliveryTS}).
 
-make_delay(DelayTS, Exchange, Delivery) ->
-    #delay_entry{delay_key = make_key(DelayTS, Exchange),
-                 delivery  = Delivery,
-                 ref       = make_ref()}.
+make_db_key(DelayTS) ->
+    <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.
 
-make_index(DelayTS, Exchange) ->
-    #delay_index{delay_key = make_key(DelayTS, Exchange),
-                 const = true}.
+%% Collect and delete all entries whose key begins with <<DeliveryTS:64/big>>,
+%% returning the list of {ExName, Message} pairs.
+fetch_and_delete(Bookie, DeliveryTS) ->
+    StartKey = <<DeliveryTS:64/big, 0:128>>,
+    EndKey   = <<DeliveryTS:64/big, 255, 255, 255, 255, 255, 255, 255, 255,
+                                    255, 255, 255, 255, 255, 255, 255, 255>>,
+    FoldFun = fun(_B, K, V, Acc) -> [{K, V} | Acc] end,
+    {async, Runner} = leveled_bookie:book_objectfold(
+        Bookie, ?STD_TAG, ?BUCKET, {StartKey, EndKey}, {FoldFun, []}, false),
+    Entries = Runner(),
+    lists:foreach(fun({Key, _}) ->
+        _ = leveled_bookie:book_delete(Bookie, ?BUCKET, Key, [])
+    end, Entries),
+    [{ExName, Msg} || {_Key, Value} <- Entries,
+                      {ExName, Msg} <- [binary_to_term(Value)]].
 
-make_key(DelayTS, Exchange) ->
-    #delay_key{timestamp = DelayTS,
-               exchange  = Exchange}.
-
-append_to_atom(Atom, Append) when is_atom(Append) ->
-    append_to_atom(Atom, atom_to_list(Append));
-append_to_atom(Atom, Append) when is_list(Append) ->
-    list_to_atom(atom_to_list(Atom) ++ Append).
-
-recover() ->
-    %% topology recovery has already happened, we have to recover state for any durable
-    %% consistent hash exchanges since plugin activation was moved later in boot process
-    %% starting with RabbitMQ 3.8.4
-    case list_exchanges() of
-        {error, Reason} ->
-            ?LOG_ERROR(
-               "Delayed message exchange: "
-               "failed to recover durable bindings of one of the exchanges, reason: ~p",
-               [Reason]);
-        Xs ->
-            ?LOG_DEBUG("Delayed message exchange: "
-                       "have ~b durable exchanges to recover",
-                       [length(Xs)]),
-            [recover_exchange_and_bindings(X) || X <- lists:usort(Xs)]
-    end.
-
-list_exchanges() ->
-    Pattern = #exchange{durable = true, type = 'x-delayed-message', _ = '_'},
-    rabbit_db_exchange:match(Pattern).
-
-recover_exchange_and_bindings(#exchange{name = XName} = X) ->
-    Bindings = rabbit_binding:list_for_source(XName),
-    _ = [rabbit_exchange_type_delayed_message:add_binding(none, X, B)
-         || B <- lists:usort(Bindings)],
-    ?LOG_DEBUG("Delayed message exchange: "
-               "recovered bindings for ~s",
-               [rabbit_misc:rs(XName)]).
+count_messages_for_exchange(Bookie, ExName) ->
+    FoldFun = fun(_B, _K, V, Acc) ->
+        case binary_to_term(V) of
+            {ExName, _} -> Acc + 1;
+            _           -> Acc
+        end
+    end,
+    {async, Runner} = leveled_bookie:book_objectfold(
+        Bookie, ?STD_TAG, ?BUCKET, all, {FoldFun, 0}, false),
+    Runner().
 
 %% These metrics are normally bumped from a channel process via which
 %% the publish actually happened. In the special case of delayed
@@ -330,9 +229,3 @@ bump_routed_stats(ExName, Qs, State) ->
 
 refresh_config(State) ->
     rabbit_event:init_stats_timer(State, #state.stats_state).
-
-table_name() ->
-    ?TABLE_NAME.
-
-index_table_name() ->
-    ?INDEX_TABLE_NAME.

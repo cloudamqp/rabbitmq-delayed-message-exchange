@@ -10,19 +10,8 @@
 -behaviour(application).
 -export([start/2, stop/1]).
 
-%% Same idea as for federation. We need to make sure
-%% rabbit_delayed_message.erl is running to make it start publishing
-%% delayed messages that might have been persisted but not published
-%% yet.
--behaviour(supervisor).
--export([init/1]).
-
 start(_Type, _StartArgs) ->
-    rabbit_delayed_message:go(),
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+    rabbit_delayed_message_sup:start_link().
 
 stop(_State) ->
     ok.
-%%----------------------------------------------------------------------------
-
-init([]) -> {ok, {{one_for_one, 3, 10}, []}}.
