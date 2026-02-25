@@ -1,27 +1,23 @@
 -module(rabbit_delayed_message_mnesia).
+
+-include_lib("rabbit_common/include/rabbit.hrl").
 -include("rabbit_delayed_message.hrl").
 
 -export([setup_schema/0,
          disable_plugin/0,
          messages_delayed/1,
-         store_delay/3
+         store_delay/3,
+         get_first_delay_key/0,
+         get_many/1,
+         delete/1,
+         delete_index/1
         ]).
 
--record(delay_key,
-        { timestamp, %% timestamp delay
-          exchange   %% rabbit_types:exchange()
-        }).
+%% For testing, debugging and manual use
+-export([table_name/0,
+         index_table_name/0]).
 
--record(delay_entry,
-        { delay_key, %% delay_key record
-          delivery,  %% the message delivery
-          ref        %% ref to make records distinct for 'bag' semantics.
-        }).
-
--record(delay_index,
-        { delay_key, %% delay_key record
-          const      %% record must have two fields
-        }).
+%%--------------------------------------------------------------------
 
 setup_schema() ->
     _ = mnesia:create_table(?TABLE_NAME, [{record_name, delay_entry},
@@ -48,11 +44,30 @@ messages_delayed(Exchange) ->
     Delays = mnesia:dirty_select(?TABLE_NAME, [{MatchHead, [], [true]}]),
     length(Delays).
 
-store_delay(Exchange, Delivery, Delay) ->
+store_delay(DelayTS, Exchange, Message) ->
     mnesia:dirty_write(?INDEX_TABLE_NAME,
                        make_index(DelayTS, Exchange)),
     mnesia:dirty_write(?TABLE_NAME,
                        make_delay(DelayTS, Exchange, Message)).
+
+get_first_delay_key() ->
+    case mnesia:dirty_first(?INDEX_TABLE_NAME) of
+        #delay_key{} = FirstKey ->
+            FirstKey;
+        _ ->
+            undefined
+    end.
+
+get_many(Key) ->
+    mnesia:dirty_read(?TABLE_NAME, Key).
+
+delete(Key) ->
+    mnesia:dirty_delete(?TABLE_NAME, Key).
+
+delete_index(Key) ->
+    mnesia:dirty_delete(?INDEX_TABLE_NAME, Key).
+
+
 
 make_delay(DelayTS, Exchange, Delivery) ->
     #delay_entry{delay_key = make_key(DelayTS, Exchange),
@@ -66,6 +81,12 @@ make_index(DelayTS, Exchange) ->
 make_key(DelayTS, Exchange) ->
     #delay_key{timestamp = DelayTS,
                exchange  = Exchange}.
+
+table_name() ->
+    ?TABLE_NAME.
+
+index_table_name() ->
+    ?INDEX_TABLE_NAME.
 
 % DO I REALLY NEED THIS??
 % ensure_mnesia_running() ->
