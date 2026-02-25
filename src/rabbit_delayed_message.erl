@@ -12,58 +12,42 @@
 -behaviour(gen_server).
 
 -export([start_link/0,
-         delay_message/3,
          disable_plugin/0,
-         go/0]).
+         delay_message/3,
+         messages_delayed/1]).
+
+%% Gen server exports
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
--export([messages_delayed/1]).
--export([get/2]).
 
 %% For testing, debugging and manual use
--export([refresh_config/0,
-         table_name/0,
-         index_table_name/0]).
+-export([refresh_config/0]).
 
 -import(rabbit_delayed_message_utils, [swap_delay_header/1]).
 
 -type t_reference() :: reference().
 -type delay() :: non_neg_integer().
 
-
--spec delay_message(rabbit_types:exchange(),
-                    mc:state(),
-                    delay()) ->
-                           nodelay | {ok, t_reference()}.
-
--spec internal_delay_message(t_reference(),
-                             rabbit_types:exchange(),
-                             mc:state(),
-                             delay()) ->
-                                    nodelay | {ok, t_reference()}.
-
-
 -record(state, {timer,
                 stats_state}).
 
 %%--------------------------------------------------------------------
-
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-
-go() ->
-    gen_server:cast(?MODULE, go).
-
-delay_message(Exchange, Message, Delay) ->
-    gen_server:call(?MODULE, {delay_message, Exchange, Message, Delay},
-                    infinity).
-
 
 disable_plugin() ->
     rabbit_khepri:handle_fallback(
             #{mnesia => fun() -> rabbit_delayed_message_mnesia:disable_plugin() end,
               khepri => fun() -> ok end}
         ).
+
+-spec delay_message(rabbit_types:exchange(),
+                    mc:state(),
+                    delay()) ->
+                           nodelay | {ok, t_reference()}.
+delay_message(Exchange, Message, Delay) ->
+    gen_server:call(?MODULE, {delay_message, Exchange, Message, Delay},
+                    infinity).
 
 messages_delayed(Exchange) ->
     rabbit_khepri:handle_fallback(
@@ -76,9 +60,18 @@ refresh_config() ->
 
 
 init([]) ->
+    % TODO: I removed the startup complexity + the `go/0` part in this module.
+    % Do I need to do something to compensate and ensure no message is waiting to be
+    % delayed/delay-expire without `timer` (i.e. `timer = not_set`)?
     setup_schema(),
     _ = recover(),
     {ok, #state{timer = not_set}}.
+
+setup_schema() ->
+    rabbit_khepri:handle_fallback(
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:setup_schema() end,
+              khepri => fun() -> ok end}
+        ).
 
 handle_call({delay_message, Exchange, Message, Delay},
             _From, State = #state{timer = CurrTimer}) ->
@@ -90,20 +83,17 @@ handle_call(refresh_config, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
-handle_cast(go, State) ->
-    State2 = refresh_config(State),
-    {noreply, State2#state{timer = maybe_delay_first()}};
 handle_cast(_C, State) ->
     {noreply, State}.
 
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
-    case mnesia:dirty_read(?TABLE_NAME, Key) of
+    case get_many(Key) of
         [] ->
-            mnesia:dirty_delete(?INDEX_TABLE_NAME, Key);
+            delete_index(Key);
         Deliveries ->
             _ = route(Key, Deliveries, State),
-            mnesia:dirty_delete(?TABLE_NAME, Key),
-            mnesia:dirty_delete(?INDEX_TABLE_NAME, Key)
+            delete(Key),
+            delete_index(Key)
     end,
     {noreply, State#state{timer = maybe_delay_first()}};
 handle_info(_I, State) ->
@@ -115,15 +105,38 @@ terminate(_, _) ->
 code_change(_, State, _) -> {ok, State}.
 
 %%--------------------------------------------------------------------
+get_many(Key) ->
+    rabbit_khepri:handle_fallback(
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:get_many(Key) end,
+              khepri => fun() -> ok end}
+        ).
+
+delete(Key) ->
+    rabbit_khepri:handle_fallback(
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:delete(Key) end,
+              khepri => fun() -> ok end}
+        ).
+
+delete_index(Key) ->
+    rabbit_khepri:handle_fallback(
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:delete_index(Key) end,
+              khepri => fun() -> ok end}
+        ).
+
+get_first_delay_key() ->
+    rabbit_khepri:handle_fallback(
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:get_first_delay_key() end,
+              khepri => fun() -> ok end}
+        ).
 
 maybe_delay_first() ->
-    case mnesia:dirty_first(?INDEX_TABLE_NAME) of
+    case get_first_delay_key() of
         %% destructuring to prevent matching '$end_of_table'
-        #delay_key{timestamp = FirstTS} = Key2 ->
+        #delay_key{timestamp = FirstTS} = FirstKey ->
             %% there are messages that will expire and need to be delivered
             Now = erlang:system_time(milli_seconds),
-            start_timer(FirstTS - Now, Key2);
-        _ ->
+            start_timer(FirstTS - Now, FirstKey);
+        undefined ->
             %% nothing to do
             not_set
     end.
@@ -144,6 +157,15 @@ route(#delay_key{exchange = Ex}, Deliveries, State) ->
                       bump_routed_stats(ExName, Qs, State)
               end, Deliveries).
 
+-spec internal_delay_message(TReference,
+                             Exchange,
+                             MCState,
+                             Delay) -> Resp when
+    TReference :: t_reference(),
+    Exchange :: rabbit_types:exchange(),
+    MCState :: mc:state(),
+    Delay :: delay(),
+    Resp :: nodelay | {ok, t_reference()}.
 internal_delay_message(CurrTimer, Exchange, Message, Delay) ->
     Now = erlang:system_time(milli_seconds),
     %% keys are timestamps in milliseconds,in the future
@@ -161,7 +183,7 @@ internal_delay_message(CurrTimer, Exchange, Message, Delay) ->
                 CurrMS when Delay < CurrMS ->
                     %% Current timer lasts longer that new message delay
                     _ = erlang:cancel_timer(CurrTimer),
-                    {ok, start_timer(Delay, make_key(DelayTS, Exchange))};
+                    {ok, start_timer(Delay, {DelayTS, Exchange})};
                 _ ->
                     %% Timer is set to expire sooner than this
                     %% message's scheduled delivery time.
@@ -180,9 +202,9 @@ store_delayed(DelayTS, Exchange, Message) ->
                         end,
               khepri => fun() -> ok end}
         ).
+
 start_timer(Delay, Key) ->
     erlang:start_timer(erlang:max(0, Delay), self(), {deliver, Key}).
-
 
 recover() ->
     %% topology recovery has already happened, we have to recover state for any durable
@@ -254,9 +276,3 @@ bump_routed_stats(ExName, Qs, State) ->
 
 refresh_config(State) ->
     rabbit_event:init_stats_timer(State, #state.stats_state).
-
-table_name() ->
-    ?TABLE_NAME.
-
-index_table_name() ->
-    ?INDEX_TABLE_NAME.
