@@ -53,7 +53,7 @@ delay_message(Exchange, Message, Delay) ->
 messages_delayed(Exchange) ->
     rabbit_khepri:handle_fallback(
             #{mnesia => fun() -> rabbit_delayed_message_mnesia:messages_delayed(Exchange) end,
-              khepri => fun() -> ok end}
+              khepri => fun() -> rabbit_delayed_message_leveled:messages_delayed(Exchange) end}
         ).
 
 refresh_config() ->
@@ -64,14 +64,16 @@ init([]) ->
     % TODO: I removed the startup complexity + the `go/0` part in this module.
     % Do I need to do something to compensate and ensure no message is waiting to be
     % delayed/delay-expire without `timer` (i.e. `timer = not_set`)?
-    setup_schema(),
+    setup(),
     _ = recover(),
-    {ok, #state{timer = maybe_delay_first()}}.
+    State0 = #state{timer = maybe_delay_first()},
+    State = rabbit_event:init_stats_timer(State0, #state.stats_state),
+    {ok, State}.
 
-setup_schema() ->
+setup() ->
     rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:setup_schema() end,
-              khepri => fun() -> ok end}
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:setup() end,
+              khepri => fun() -> rabbit_delayed_message_leveled:setup() end}
         ).
 
 handle_call({delay_message, Exchange, Message, Delay},
@@ -92,7 +94,7 @@ handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
         [] ->
             delete_index(Key);
         Deliveries ->
-            _ = route(Key, Deliveries, State),
+            _ = route(Deliveries, State),
             delete(Key),
             delete_index(Key)
     end,
@@ -109,7 +111,7 @@ code_change(_, State, _) -> {ok, State}.
 get_many(Key) ->
     rabbit_khepri:handle_fallback(
             #{mnesia => fun() -> rabbit_delayed_message_mnesia:get_many(Key) end,
-              khepri => fun() -> ok end}
+              khepri => fun() -> rabbit_delayed_message_leveled:get_many(Key) end}
         ).
 
 delete(Key) ->
@@ -124,37 +126,31 @@ delete_index(Key) ->
               khepri => fun() -> ok end}
         ).
 
-get_first_delay_key() ->
+get_first_delay() ->
     rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:get_first_delay_key() end,
-              khepri => fun() -> ok end}
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:get_first_delay() end,
+              khepri => fun() -> rabbit_delayed_message_leveled:get_first_delay() end}
         ).
 
 maybe_delay_first() ->
-    case get_first_delay_key() of
+    case get_first_delay() of
         %% destructuring to prevent matching '$end_of_table'
-        #delay_key{timestamp = FirstTS} = FirstKey ->
+        {FirstTS, DelayKey} ->
             %% there are messages that will expire and need to be delivered
             Now = erlang:system_time(milli_seconds),
-            start_timer(FirstTS - Now, FirstKey);
+            start_timer(FirstTS - Now, DelayKey);
         undefined ->
             %% nothing to do
             not_set
     end.
 
-route(#delay_key{exchange = Ex}, Deliveries, State) ->
-    ExName = Ex#exchange.name,
-    lists:map(fun (#delay_entry{delivery = Msg0}) ->
-                      Msg1 = case Msg0 of
-                               #delivery{message = BasicMessage} ->
-                                     BasicMessage;
-                               _MC ->
-                                   Msg0
-                           end,
-                      Msg2 = swap_delay_header(Msg1),
-                      Dests = rabbit_exchange:route(Ex, Msg2),
+route(Deliveries, State) ->
+    lists:map(fun ({Ex, Msg}) ->
+                      ExName = Ex#exchange.name,
+                      Msg1 = swap_delay_header(Msg),
+                      Dests = rabbit_exchange:route(Ex, Msg1),
                       Qs = rabbit_db_queue:get_targets(Dests),
-                      _ = rabbit_queue_type:deliver(Qs, Msg2, #{}, stateless),
+                      _ = rabbit_queue_type:deliver(Qs, Msg1, #{}, stateless),
                       bump_routed_stats(ExName, Qs, State)
               end, Deliveries).
 
@@ -258,26 +254,25 @@ bump_routed_stats(ExName, Qs, State) ->
     % and my guess is that that's done based on the mnesia table name that is
     % passed in the `rabbit_mnesia_tables_to_khepri_db` module attribute.
     rabbit_global_counters:messages_routed(amqp091, length(Qs)),
-    % case rabbit_event:stats_level(State, #state.stats_state) of
-    %     fine ->
-    %         [begin
-    %              QName = amqqueue:get_name(Q),
-    %              %% Channel PID is just an identifier in the metrics
-    %              %% DB. However core metrics GC will delete entries
-    %              %% with a not-alive PID, and by the time the delayed
-    %              %% message gets delivered the original channel
-    %              %% process might be long gone, hence we need a live
-    %              %% PID in the key.
-    %              FakeChannelId = self(),
-    %              Key = {FakeChannelId, {QName, ExName}},
-    %              rabbit_core_metrics:channel_stats(queue_exchange_stats, publish, Key, 1)
-    %          end
-    %          || Q <- Qs],
-    %         ok;
-    %     _ ->
-    %         ok
-    % end.
-    ok.
+    case rabbit_event:stats_level(State, #state.stats_state) of
+        fine ->
+            [begin
+                 QName = amqqueue:get_name(Q),
+                 %% Channel PID is just an identifier in the metrics
+                 %% DB. However core metrics GC will delete entries
+                 %% with a not-alive PID, and by the time the delayed
+                 %% message gets delivered the original channel
+                 %% process might be long gone, hence we need a live
+                 %% PID in the key.
+                 FakeChannelId = self(),
+                 Key = {FakeChannelId, {QName, ExName}},
+                 rabbit_core_metrics:channel_stats(queue_exchange_stats, publish, Key, 1)
+             end
+             || Q <- Qs],
+            ok;
+        _ ->
+            ok
+    end.
 
 refresh_config(State) ->
     rabbit_event:init_stats_timer(State, #state.stats_state).
