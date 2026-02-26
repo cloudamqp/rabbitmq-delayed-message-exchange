@@ -3,11 +3,11 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include("rabbit_delayed_message.hrl").
 
--export([setup_schema/0,
+-export([setup/0,
          disable_plugin/0,
          messages_delayed/1,
          store_delay/3,
-         get_first_delay_key/0,
+         get_first_delay/0,
          get_many/1,
          delete/1,
          delete_index/1
@@ -19,7 +19,7 @@
 
 %%--------------------------------------------------------------------
 
-setup_schema() ->
+setup() ->
     _ = mnesia:create_table(?TABLE_NAME, [{record_name, delay_entry},
                                           {attributes,
                                            record_info(fields, delay_entry)},
@@ -50,16 +50,23 @@ store_delay(DelayTS, Exchange, Message) ->
     mnesia:dirty_write(?TABLE_NAME,
                        make_delay(DelayTS, Exchange, Message)).
 
-get_first_delay_key() ->
+get_first_delay() ->
     case mnesia:dirty_first(?INDEX_TABLE_NAME) of
-        #delay_key{} = FirstKey ->
-            FirstKey;
+        #delay_key{timestamp = DelayTS} = FirstKey ->
+            {DelayTS, FirstKey};
         _ ->
             undefined
     end.
 
 get_many(Key) ->
-    mnesia:dirty_read(?TABLE_NAME, Key).
+    DelayEntries = mnesia:dirty_read(?TABLE_NAME, Key),
+    [{Ex, case Msg0 of
+           #delivery{message = BasicMessage} ->
+                 BasicMessage;
+           _MC ->
+               Msg0
+       end} || #delay_entry{delay_key = #delay_key{exchange = Ex},
+                           delivery = Msg0} <- DelayEntries].
 
 delete(Key) ->
     mnesia:dirty_delete(?TABLE_NAME, Key).
