@@ -283,9 +283,7 @@ node_restart_before_delay_expires(Config) ->
     %% Here, we suppose the node will be restarted before all messages
     %% are actually queued.
     Msgs = [5000, 10000, 3000, 2000, 15000, 1000, 4000],
-
     publish_messages(Chan, Ex, Msgs),
-
     rabbit_ct_broker_helpers:restart_node(Config, 0),
 
     Chan2 =  rabbit_ct_client_helpers:open_channel(Config),
