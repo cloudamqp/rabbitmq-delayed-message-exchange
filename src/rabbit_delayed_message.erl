@@ -11,6 +11,7 @@
 
 -behaviour(gen_server).
 
+% Public API exports
 -export([start_link/0,
          disable_plugin/0,
          delay_message/3,
@@ -20,7 +21,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
 
-%% For testing, debugging and manual use
+%% Testing & debugging exports
 -export([refresh_config/0]).
 
 -import(rabbit_delayed_message_utils, [swap_delay_header/1]).
@@ -65,7 +66,7 @@ init([]) ->
     % delayed/delay-expire without `timer` (i.e. `timer = not_set`)?
     setup_schema(),
     _ = recover(),
-    {ok, #state{timer = not_set}}.
+    {ok, #state{timer = maybe_delay_first()}}.
 
 setup_schema() ->
     rabbit_khepri:handle_fallback(
@@ -253,26 +254,30 @@ recover_exchange_and_bindings(#exchange{name = XName} = X) ->
 %% also delete the entries when this process is not alive ie when the
 %% plugin is disabled.
 bump_routed_stats(ExName, Qs, State) ->
+    % TODO: I think the `#state.stats_state` is updated somewhere in rabbit
+    % and my guess is that that's done based on the mnesia table name that is
+    % passed in the `rabbit_mnesia_tables_to_khepri_db` module attribute.
     rabbit_global_counters:messages_routed(amqp091, length(Qs)),
-    case rabbit_event:stats_level(State, #state.stats_state) of
-        fine ->
-            [begin
-                 QName = amqqueue:get_name(Q),
-                 %% Channel PID is just an identifier in the metrics
-                 %% DB. However core metrics GC will delete entries
-                 %% with a not-alive PID, and by the time the delayed
-                 %% message gets delivered the original channel
-                 %% process might be long gone, hence we need a live
-                 %% PID in the key.
-                 FakeChannelId = self(),
-                 Key = {FakeChannelId, {QName, ExName}},
-                 rabbit_core_metrics:channel_stats(queue_exchange_stats, publish, Key, 1)
-             end
-             || Q <- Qs],
-            ok;
-        _ ->
-            ok
-    end.
+    % case rabbit_event:stats_level(State, #state.stats_state) of
+    %     fine ->
+    %         [begin
+    %              QName = amqqueue:get_name(Q),
+    %              %% Channel PID is just an identifier in the metrics
+    %              %% DB. However core metrics GC will delete entries
+    %              %% with a not-alive PID, and by the time the delayed
+    %              %% message gets delivered the original channel
+    %              %% process might be long gone, hence we need a live
+    %              %% PID in the key.
+    %              FakeChannelId = self(),
+    %              Key = {FakeChannelId, {QName, ExName}},
+    %              rabbit_core_metrics:channel_stats(queue_exchange_stats, publish, Key, 1)
+    %          end
+    %          || Q <- Qs],
+    %         ok;
+    %     _ ->
+    %         ok
+    % end.
+    ok.
 
 refresh_config(State) ->
     rabbit_event:init_stats_timer(State, #state.stats_state).
