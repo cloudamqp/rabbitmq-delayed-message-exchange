@@ -33,14 +33,12 @@
                 stats_state}).
 
 %%--------------------------------------------------------------------
+% Public API exports
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 disable_plugin() ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:disable_plugin() end,
-              khepri => fun() -> ok end}
-        ).
+    gen_server:call(?MODULE, disable_plugin, infinity).
 
 -spec delay_message(rabbit_types:exchange(),
                     mc:state(),
@@ -51,15 +49,13 @@ delay_message(Exchange, Message, Delay) ->
                     infinity).
 
 messages_delayed(Exchange) ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:messages_delayed(Exchange) end,
-              khepri => fun() -> rabbit_delayed_message_leveled:messages_delayed(Exchange) end}
-        ).
+    gen_server:call(?MODULE, {messages_delayed, Exchange}).
 
 refresh_config() ->
     gen_server:call(?MODULE, refresh_config).
 
-
+%%--------------------------------------------------------------------
+% Gen server exports
 init([]) ->
     % TODO: I removed the startup complexity + the `go/0` part in this module.
     % Do I need to do something to compensate and ensure no message is waiting to be
@@ -70,12 +66,12 @@ init([]) ->
     State = rabbit_event:init_stats_timer(State0, #state.stats_state),
     {ok, State}.
 
-setup() ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:setup() end,
-              khepri => fun() -> rabbit_delayed_message_leveled:setup() end}
-        ).
-
+handle_call({messages_delayed, Exchange}, _From, State) ->
+    MessagesDelayed = rabbit_khepri:handle_fallback(
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:messages_delayed(Exchange) end,
+              khepri => fun() -> rabbit_delayed_message_leveled:messages_delayed(Exchange) end}
+        ),
+    {reply, MessagesDelayed, State};
 handle_call({delay_message, Exchange, Message, Delay},
             _From, State = #state{timer = CurrTimer}) ->
     Reply = {ok, NewTimer} = internal_delay_message(CurrTimer, Exchange, Message, Delay),
@@ -86,6 +82,12 @@ handle_call(refresh_config, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
+handle_cast(disable_plugin, State) ->
+    rabbit_khepri:handle_fallback(
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:disable_plugin() end,
+              khepri => fun() -> rabbit_delayed_message_leveled:disable_plugin() end}
+        ),
+    {reply, ok, State};
 handle_cast(_C, State) ->
     {noreply, State}.
 
@@ -117,7 +119,7 @@ get_many(Key) ->
 delete(Key) ->
     rabbit_khepri:handle_fallback(
             #{mnesia => fun() -> rabbit_delayed_message_mnesia:delete(Key) end,
-              khepri => fun() -> ok end}
+              khepri => fun() -> rabbit_delayed_message_leveled:delete(Key) end}
         ).
 
 delete_index(Key) ->
@@ -180,7 +182,9 @@ internal_delay_message(CurrTimer, Exchange, Message, Delay) ->
                 CurrMS when Delay < CurrMS ->
                     %% Current timer lasts longer that new message delay
                     _ = erlang:cancel_timer(CurrTimer),
-                    {ok, start_timer(Delay, {DelayTS, Exchange})};
+                    % TODO: Can we save some time getting the key from before?
+                    {_, Key} = get_first_delay(),
+                    {ok, start_timer(Delay, Key)};
                 _ ->
                     %% Timer is set to expire sooner than this
                     %% message's scheduled delivery time.
@@ -197,11 +201,21 @@ store_delayed(DelayTS, Exchange, Message) ->
                                                                       Exchange,
                                                                       Message)
                         end,
-              khepri => fun() -> ok end}
+              khepri => fun() ->
+                            rabbit_delayed_message_leveled:store_delay(DelayTS,
+                                                                       Exchange,
+                                                                       Message)
+                        end}
         ).
 
 start_timer(Delay, Key) ->
     erlang:start_timer(erlang:max(0, Delay), self(), {deliver, Key}).
+
+setup() ->
+    rabbit_khepri:handle_fallback(
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:setup() end,
+              khepri => fun() -> rabbit_delayed_message_leveled:setup() end}
+        ).
 
 recover() ->
     %% topology recovery has already happened, we have to recover state for any durable
