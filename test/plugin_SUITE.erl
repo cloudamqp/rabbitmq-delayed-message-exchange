@@ -14,12 +14,14 @@
 
 all() ->
     [
-      {group, non_parallel_tests},
-      {group, fine_stats}
+      {group, mnesia},
+      {group, leveled}
     ].
 
 groups() ->
     [
+      {mnesia, [], [{group, non_parallel_tests}, {group, fine_stats}]},
+      {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
@@ -40,34 +42,49 @@ groups() ->
                       ]}
     ].
 
-
 %% -------------------------------------------------------------------
 %% Setup/teardown.
 %% -------------------------------------------------------------------
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
-    Config1 = rabbit_ct_helpers:set_config(Config, [
-        {rmq_nodename_suffix, ?MODULE},
-        {metadata_store, mnesia}
-      ]),
-    rabbit_ct_helpers:run_setup_steps(Config1,
-      rabbit_ct_broker_helpers:setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps()).
+    rabbit_ct_helpers:set_config(Config, [
+        {rmq_nodename_suffix, ?MODULE}
+    ]).
 
 end_per_suite(Config) ->
-    rabbit_ct_helpers:run_teardown_steps(Config,
-      rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()).
+    Config.
 
+init_per_group(mnesia, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-mnesia")}
+        ]
+    ),
+    run_broker_and_clients(Config1);
+init_per_group(leveled, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, khepri},
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-leveled")}
+        ]
+    ),
+    run_broker_and_clients(Config1);
 init_per_group(fine_stats, Config) ->
     CollectStatsOrig = get_collect_stats(Config),
     set_collect_stats(Config, fine),
     refresh_config(Config),
-    [{collect_statistics, fine}, {collect_statistics_orig, CollectStatsOrig}|Config];
+    [{collect_statistics, fine}, {collect_statistics_orig, CollectStatsOrig} | Config];
 init_per_group(_, Config) ->
     Config.
 
+end_per_group(mnesia, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(leveled, Config) ->
+    teardown_broker_and_clients(Config);
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
     set_collect_stats(Config, CollectStatsOrig),
@@ -75,6 +92,16 @@ end_per_group(fine_stats, Config) ->
     Config;
 end_per_group(_, Config) ->
     Config.
+
+run_broker_and_clients(Config) ->
+    rabbit_ct_helpers:run_setup_steps(Config,
+      rabbit_ct_broker_helpers:setup_steps() ++
+      rabbit_ct_client_helpers:setup_steps()).
+
+teardown_broker_and_clients(Config) ->
+    rabbit_ct_helpers:run_teardown_steps(Config,
+      rabbit_ct_client_helpers:teardown_steps() ++
+      rabbit_ct_broker_helpers:teardown_steps()).
 
 init_per_testcase(Testcase, Config) ->
     TestCaseName = rabbit_ct_helpers:config_to_testcase_name(Config, Testcase),
@@ -238,6 +265,8 @@ delayed_messages_count(Config) ->
 
     Msgs = [500, 200, 300, 200, 300, 400],
 
+    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_app, trace, []),
+
     publish_messages(Chan, Ex, Msgs),
 
     % Let messages schedule.
@@ -386,7 +415,6 @@ consume(Chan, Q, Msgs) ->
         amqp_channel:subscribe(Chan, #'basic.consume'{queue  = Q,
                                                       no_ack = true}, self()),
     collect(length(Msgs), lists:max(Msgs) + 3000).
-
 
 collect(N, Timeout) ->
     collect(0, N, Timeout, []).

@@ -57,13 +57,13 @@ get_first_delay() ->
         ?BOOKIE, ?STD_TAG, ?BUCKET, {FoldFun, not_found}),
     try Runner() of
         not_found ->
-            not_found
+            undefined
     catch
         throw:{first_key, <<TS:64/big, _:16/binary>> = FirstKey} ->
             {TS, FirstKey}
     end.
 
-get_many(<<DeliveryTS:64/binary, _:16/binary>>) ->
+get_many(<<DeliveryTS:64/big, _:16/binary>>) ->
     StartKey = <<DeliveryTS:64/big, 0:128>>,
     EndKey   = <<DeliveryTS:64/big, 255, 255, 255, 255, 255, 255, 255, 255,
                                     255, 255, 255, 255, 255, 255, 255, 255>>,
@@ -74,12 +74,13 @@ get_many(<<DeliveryTS:64/binary, _:16/binary>>) ->
     [Entry || {_Key, Value} <- Entries,
               Entry <- [binary_to_term(Value)]].
 
-delete(<<DeliveryTS:64/binary, _:16/binary>>) ->
+delete(<<DeliveryTS:64/big, _:16/binary>>) ->
     StartKey = <<DeliveryTS:64/big, 0:128>>,
     EndKey   = <<DeliveryTS:64/big, 255, 255, 255, 255, 255, 255, 255, 255,
                                     255, 255, 255, 255, 255, 255, 255, 255>>,
-    FoldFun = fun(B, K, {Exchange, _}, _Acc) ->
+    FoldFun = fun(B, K, Term, _Acc) ->
                       Res = leveled_bookie:book_delete(?BOOKIE, B, K, []),
+                      {Exchange, _} = binary_to_term(Term),
                       decrease_counter(Exchange#exchange.name),
                       Res
               end,
@@ -100,7 +101,7 @@ init_counters() ->
     DelayedPerExchange = delayed_per_exchange(),
     maps:foreach(fun(ExName, Count) ->
                       Atomic = atomics:new(1, [{signed, false}]),
-                      atomics:put(1, Atomic, Count),
+                      atomics:put(Atomic, 1, Count),
                       put(counter_key(ExName), Atomic)
               end, DelayedPerExchange).
 
@@ -108,26 +109,43 @@ counter_key(ExName) ->
     {?MODULE, counter, ExName}.
 
 get_counter(ExName) ->
+    rabbit_log:critical("Getting counter for exchange ~p", [ExName]),
     case get(counter_key(ExName)) of
         undefined -> not_found;
-        Atomic -> atomics:get(1, Atomic)
+        Atomic ->
+            Res = atomics:get(Atomic, 1),
+            rabbit_log:critical("Result ~p", [Res]),
+            Res
     end.
 
 increase_counter(ExName) ->
-    Counter = get_counter(ExName),
-    atomics:add(Counter, 1, 1).
+    rabbit_log:critical("Increasing counter for exchange ~p", [ExName]),
+    Counter = get(counter_key(ExName)),
+    rabbit_log:critical("Counter ~p", [Counter]),
+    case Counter of
+        undefined ->
+            Counter1 = atomics:new(1, [{signed, false}]),
+            rabbit_log:critical("New counter ~p", [Counter1]),
+            PutResult = atomics:put(Counter1, 1, 1),
+            rabbit_log:critical("Put result ~p", [PutResult]),
+            put(counter_key(ExName), Counter1);
+        _ ->
+            atomics:add(Counter, 1, 1)
+    end.
 
 decrease_counter(ExName) ->
-    Counter = get_counter(ExName),
+    Counter = get(counter_key(ExName)),
     atomics:sub(Counter, 1, 1).
 
 % --------------------------------------------
 % Internal functions
 % --------------------------------------------
 delayed_per_exchange() ->
-    FoldFun = fun(B, _K, {Exchange, _}, _Acc) ->
-                      maps:update_with(Exchange#exchange.name, fun(C) -> C + 1 end, 1, B)
+    FoldFun = fun(_B, _K, Term, Acc) ->
+                      % TODO: oof, having to transform each term aint good
+                      {Exchange, _} = binary_to_term(Term),
+                      maps:update_with(Exchange#exchange.name, fun(C) -> C + 1 end, 1, Acc)
               end,
     {async, Runner} = leveled_bookie:book_objectfold(
-        ?BOOKIE, ?STD_TAG, ?BUCKET, all, {FoldFun, []}, false),
+        ?BOOKIE, ?STD_TAG, ?BUCKET, all, {FoldFun, #{}}, false),
      Runner().
