@@ -38,7 +38,10 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 disable_plugin() ->
-    gen_server:call(?MODULE, disable_plugin, infinity).
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> rabbit_delayed_message_mnesia:disable_plugin() end,
+        khepri => fun() -> rabbit_delayed_message_leveled:disable_plugin() end}
+     ).
 
 -spec delay_message(rabbit_types:exchange(),
                     mc:state(),
@@ -49,7 +52,10 @@ delay_message(Exchange, Message, Delay) ->
                     infinity).
 
 messages_delayed(Exchange) ->
-    gen_server:call(?MODULE, {messages_delayed, Exchange}).
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> rabbit_delayed_message_mnesia:messages_delayed(Exchange) end,
+        khepri => fun() -> rabbit_delayed_message_leveled:messages_delayed(Exchange) end}
+     ).
 
 refresh_config() ->
     gen_server:call(?MODULE, refresh_config).
@@ -66,12 +72,6 @@ init([]) ->
     State = rabbit_event:init_stats_timer(State0, #state.stats_state),
     {ok, State}.
 
-handle_call({messages_delayed, Exchange}, _From, State) ->
-    MessagesDelayed = rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:messages_delayed(Exchange) end,
-              khepri => fun() -> rabbit_delayed_message_leveled:messages_delayed(Exchange) end}
-        ),
-    {reply, MessagesDelayed, State};
 handle_call({delay_message, Exchange, Message, Delay},
             _From, State = #state{timer = CurrTimer}) ->
     Reply = {ok, NewTimer} = internal_delay_message(CurrTimer, Exchange, Message, Delay),
@@ -82,12 +82,6 @@ handle_call(refresh_config, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
-handle_cast(disable_plugin, State) ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:disable_plugin() end,
-              khepri => fun() -> rabbit_delayed_message_leveled:disable_plugin() end}
-        ),
-    {reply, ok, State};
 handle_cast(_C, State) ->
     {noreply, State}.
 

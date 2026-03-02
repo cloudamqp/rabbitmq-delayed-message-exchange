@@ -103,7 +103,7 @@ end_per_group(_, Config) ->
 %% throughout the test case for the same reason.
 init_per_testcase(Testcase, Config) ->
     Backend = backend(Config),
-    ets:new(?TIMINGS_TABLE, [named_table, public, bag]),
+    ets:new(?TIMINGS_TABLE, [named_table, public, duplicate_bag]),
     ok = Backend:setup(),
     [{benchmark, Testcase} | Config].
 
