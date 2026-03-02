@@ -23,8 +23,14 @@ dep_zstd                   = git https://github.com/OpenRiak/zstd-erlang.git ope
 # eqwalizer_support is a type-checking tool; suppress it across all sub-builds.
 DEPS = rabbit_common rabbit leveled lz4 zstd
 export IGNORE_DEPS += eqwalizer_support
-TEST_DEPS = ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client
+TEST_DEPS = ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck
 dep_ct_helper = git https://github.com/extend/ct_helper.git master
+
+# Only the integration suite runs under `make ct` / `make tests`.
+# The benchmark suite is excluded here and invoked via `make benchmarks`.
+CT_SUITES = plugin
+
+BENCH_LOGS_DIR ?= $(CURDIR)/logs/benchmarks
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk
@@ -37,3 +43,11 @@ ERLANG_MK_COMMIT = rabbitmq-tmp
 
 include rabbitmq-components.mk
 include erlang.mk
+
+benchmarks: test-build
+	$(verbose) mkdir -p $(BENCH_LOGS_DIR)
+	$(gen_verbose) $(CT_RUN) \
+		-sname ct_$(PROJECT)_bench \
+		-suite benchmark_SUITE \
+		-logdir $(BENCH_LOGS_DIR) \
+		$(CT_OPTS)
