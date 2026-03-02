@@ -11,8 +11,8 @@
 -include_lib("leveled/include/leveled.hrl").
 -include("rabbit_delayed_message.hrl").
 
--define(BOOKIE(Bookie), put({?MODULE, bookie}, Bookie)).
--define(BOOKIE, get({?MODULE, bookie})).
+-define(BOOKIE(Bookie), persistent_term:put({?MODULE, bookie}, Bookie)).
+-define(BOOKIE, persistent_term:get({?MODULE, bookie}, undefined)).
 
 -export([setup/0,
          disable_plugin/0,
@@ -102,7 +102,7 @@ init_counters() ->
     maps:foreach(fun(ExName, Count) ->
                       Atomic = atomics:new(1, [{signed, false}]),
                       atomics:put(Atomic, 1, Count),
-                      put(counter_key(ExName), Atomic)
+                      persistent_term:put(counter_key(ExName), Atomic)
               end, DelayedPerExchange).
 
 counter_key(ExName) ->
@@ -110,7 +110,7 @@ counter_key(ExName) ->
 
 get_counter(ExName) ->
     rabbit_log:critical("Getting counter for exchange ~p", [ExName]),
-    case get(counter_key(ExName)) of
+    case persistent_term:get(counter_key(ExName), undefined) of
         undefined -> not_found;
         Atomic ->
             Res = atomics:get(Atomic, 1),
@@ -119,22 +119,18 @@ get_counter(ExName) ->
     end.
 
 increase_counter(ExName) ->
-    rabbit_log:critical("Increasing counter for exchange ~p", [ExName]),
-    Counter = get(counter_key(ExName)),
-    rabbit_log:critical("Counter ~p", [Counter]),
+    Counter = persistent_term:get(counter_key(ExName), undefined),
     case Counter of
         undefined ->
             Counter1 = atomics:new(1, [{signed, false}]),
-            rabbit_log:critical("New counter ~p", [Counter1]),
-            PutResult = atomics:put(Counter1, 1, 1),
-            rabbit_log:critical("Put result ~p", [PutResult]),
-            put(counter_key(ExName), Counter1);
+            atomics:put(Counter1, 1, 1),
+            persistent_term:put(counter_key(ExName), Counter1);
         _ ->
             atomics:add(Counter, 1, 1)
     end.
 
 decrease_counter(ExName) ->
-    Counter = get(counter_key(ExName)),
+    Counter = persistent_term:get(counter_key(ExName), undefined),
     atomics:sub(Counter, 1, 1).
 
 % --------------------------------------------
