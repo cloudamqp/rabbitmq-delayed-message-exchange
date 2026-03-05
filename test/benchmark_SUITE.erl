@@ -32,6 +32,9 @@
 %% Exchange name used for all benchmark messages.
 -define(BENCH_EXCHANGE_NAME, <<"bench-exchange">>).
 
+%% Getter for WITH_TIMERS env variable
+-define(WITH_TIMERS, "true" == os:getenv("WITH_TIMERS", false)).
+
 %% -------------------------------------------------------------------
 %% CT callbacks
 %% -------------------------------------------------------------------
@@ -67,30 +70,50 @@ init_per_group(mnesia, Config) ->
     application:set_env(mnesia, dir, TmpDir),
     ok = mnesia:create_schema([node()]),
     ok = mnesia:start(),
-    meck:new(rabbit_table, [non_strict, passthrough, no_link]),
-    meck:expect(rabbit_table, wait, fun(_Tables) -> ok end),
-    install_timing_wrappers(rabbit_delayed_message_mnesia),
+    case ?WITH_TIMERS of
+        true ->
+            meck:new(rabbit_table, [non_strict, passthrough, no_link]),
+            meck:expect(rabbit_table, wait, fun(_Tables) -> ok end),
+            install_timing_wrappers(rabbit_delayed_message_mnesia);
+        false ->
+            ok
+    end,
     [{backend, rabbit_delayed_message_mnesia}, {tmp_dir, TmpDir} | Config];
 %% Leveled group: mock rabbit_mnesia:dir/0 to provide a temporary data
 %% path instead of requiring the rabbit application to be running.
 init_per_group(leveled, Config) ->
     TmpDir = make_temp_dir("bench_leveled"),
-    meck:new(rabbit_mnesia, [non_strict, passthrough, no_link]),
-    meck:expect(rabbit_mnesia, dir, fun() -> TmpDir end),
-    install_timing_wrappers(rabbit_delayed_message_leveled),
+    case ?WITH_TIMERS of
+        true ->
+            meck:new(rabbit_mnesia, [non_strict, passthrough, no_link]),
+            meck:expect(rabbit_mnesia, dir, fun() -> TmpDir end),
+            install_timing_wrappers(rabbit_delayed_message_leveled);
+        false ->
+            ok
+    end,
     [{backend, rabbit_delayed_message_leveled}, {tmp_dir, TmpDir} | Config];
 init_per_group(_, Config) ->
     Config.
 
 end_per_group(mnesia, Config) ->
-    meck:unload(rabbit_delayed_message_mnesia),
-    meck:unload(rabbit_table),
+    case ?WITH_TIMERS of
+        true ->
+            meck:unload(rabbit_delayed_message_mnesia),
+            meck:unload(rabbit_table);
+        _ ->
+            ok
+    end,
     mnesia:stop(),
     remove_temp_dir(proplists:get_value(tmp_dir, Config)),
     Config;
 end_per_group(leveled, Config) ->
-    meck:unload(rabbit_delayed_message_leveled),
-    meck:unload(rabbit_mnesia),
+    case ?WITH_TIMERS of
+        true ->
+            meck:unload(rabbit_delayed_message_leveled),
+            meck:unload(rabbit_mnesia);
+        false ->
+            ok
+    end,
     remove_temp_dir(proplists:get_value(tmp_dir, Config)),
     Config;
 end_per_group(_, Config) ->
@@ -123,7 +146,9 @@ bench_store_delay(Config) ->
     Msg = make_message(),
     lists:foreach(fun(N) ->
         Now = erlang:system_time(millisecond),
-        [Backend:store_delay(Now + I, Exchange, Msg) || I <- lists:seq(1, N)],
+        with_flamegraph(fg_name(store_delay, Backend, N), N, fun() ->
+            [Backend:store_delay(Now + I, Exchange, Msg) || I <- lists:seq(1, N)]
+        end),
         report_timings(store_delay, Backend, N, Config),
         clear_store(Backend)
     end, ?LOADS).
@@ -141,7 +166,9 @@ bench_get_first_delay(Config) ->
         Now = erlang:system_time(millisecond),
         [Backend:store_delay(Now + I, Exchange, Msg) || I <- lists:seq(1, N)],
         ets:delete_all_objects(?TIMINGS_TABLE),
-        [Backend:get_first_delay() || _ <- lists:seq(1, ?SCAN_REPS)],
+        with_flamegraph(fg_name(get_first_delay, Backend, N), N, fun() ->
+            [Backend:get_first_delay() || _ <- lists:seq(1, ?SCAN_REPS)]
+        end),
         %% N is the store size (the load); actual call count is in Stats.
         report_timings(get_first_delay, Backend, N, Config),
         clear_store(Backend)
@@ -163,7 +190,9 @@ bench_get_many(Config) ->
         {_TS, Key} = Backend:get_first_delay(),
         ets:delete_all_objects(?TIMINGS_TABLE),
         %% Repeat the retrieval to get stable timing numbers.
-        [Backend:get_many(Key) || _ <- lists:seq(1, ?SCAN_REPS)],
+        with_flamegraph(fg_name(get_many, Backend, N), N, fun() ->
+            [Backend:get_many(Key) || _ <- lists:seq(1, ?SCAN_REPS)]
+        end),
         %% N is the batch size (messages returned per call); actual call count is in Stats.
         report_timings(get_many, Backend, N, Config),
         clear_store(Backend)
@@ -183,7 +212,9 @@ bench_delete(Config) ->
         ets:delete_all_objects(?TIMINGS_TABLE),
         %% Drain all N messages.  Each iteration calls get_first_delay
         %% then delete (the production pattern).
-        drain_store(Backend),
+        with_flamegraph(fg_name(delete, Backend, N), N, fun() ->
+            drain_store(Backend)
+        end),
         report_timings(delete,          Backend, N, Config),
         report_timings(get_first_delay, Backend, N, Config)
     end, ?LOADS).
@@ -198,13 +229,15 @@ bench_full_cycle(Config) ->
     Msg = make_message(),
     lists:foreach(fun(N) ->
         Now = erlang:system_time(millisecond),
-        lists:foreach(fun(I) ->
-            Backend:store_delay(Now + I, Exchange, Msg),
-            {_TS, Key} = Backend:get_first_delay(),
-            Backend:get_many(Key),
-            Backend:delete(Key),
-            Backend:delete_index(Key)
-        end, lists:seq(1, N)),
+        with_flamegraph(fg_name(full_cycle, Backend, N), N, fun() ->
+            lists:foreach(fun(I) ->
+                Backend:store_delay(Now + I, Exchange, Msg),
+                {_TS, Key} = Backend:get_first_delay(),
+                Backend:get_many(Key),
+                Backend:delete(Key),
+                Backend:delete_index(Key)
+            end, lists:seq(1, N))
+        end),
         report_timings(store_delay,     Backend, N, Config),
         report_timings(get_first_delay, Backend, N, Config),
         report_timings(get_many,        Backend, N, Config),
@@ -422,6 +455,38 @@ fmt_us_ascii(Us) ->
 
 backend_label(rabbit_delayed_message_mnesia)  -> "mnesia";
 backend_label(rabbit_delayed_message_leveled) -> "leveled".
+
+%% -------------------------------------------------------------------
+%% Helpers: flamegraph support
+%% -------------------------------------------------------------------
+
+%% Returns "backend_op_N", e.g. "leveled_get_first_delay_5000".
+fg_name(Op, Backend, N) ->
+    backend_label(Backend) ++ "_" ++ atom_to_list(Op) ++ "_" ++ integer_to_list(N).
+
+%% Runs Fun() wrapped in eflame profiling when FLAMEGRAPH_DIR is set and N
+%% does not exceed FLAMEGRAPH_MAX_LOAD (default: the smallest benchmark load).
+%% Higher loads generate too many trace events for eflame's tracer to flush
+%% within its 5-second post-run window, causing a timeout error.
+with_flamegraph(Name, N, Fun) ->
+    case os:getenv("FLAMEGRAPH_DIR") of
+        false ->
+            Fun();
+        Dir ->
+            case N =< flamegraph_max_load() of
+                true ->
+                    OutFile = filename:join(Dir, Name ++ ".out"),
+                    eflame:apply(normal_with_children, OutFile, Fun, []);
+                false ->
+                    Fun()
+            end
+    end.
+
+flamegraph_max_load() ->
+    case os:getenv("FLAMEGRAPH_MAX_LOAD") of
+        false -> hd(?LOADS);
+        V     -> list_to_integer(V)
+    end.
 
 %% -------------------------------------------------------------------
 %% Helpers: data construction
