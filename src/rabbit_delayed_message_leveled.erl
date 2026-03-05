@@ -16,7 +16,8 @@
 
 %% ordered_set ETS table keyed by <<TS:64/big, Random:16/binary>>.
 %% Big-endian byte order means ets:first/1 always returns the minimum-timestamp key.
--define(INDEX_TABLE, rabbit_delayed_message_leveled_index).
+-define(TS_INDEX_TABLE, rabbit_delayed_message_leveled_ts_index).
+-define(KEY_INDEX_TABLE, rabbit_delayed_message_leveled_key_index).
 
 -export([setup/0,
          disable_plugin/0,
@@ -46,41 +47,45 @@ setup() ->
     init_counters().
 
 disable_plugin() ->
-    catch ets:delete(?INDEX_TABLE),
+    catch ets:delete(?TS_INDEX_TABLE),
+    catch ets:delete(?KEY_INDEX_TABLE),
     leveled_bookie:book_close(?BOOKIE).
 
 messages_delayed(Exchange) ->
     get_counter(Exchange#exchange.name).
 
 store_delay(DelayTS, Exchange, Message) ->
+    rabbit_log:critical("store_delay: DelayTS=~p", [DelayTS]),
     increase_counter(Exchange#exchange.name),
     Key = make_key(DelayTS),
     leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
                                 term_to_binary({Exchange, Message}), []),
-    ets:insert(?INDEX_TABLE, {DelayTS, Key}).
+    ets:insert(?TS_INDEX_TABLE, {DelayTS}),
+    ets:insert(?KEY_INDEX_TABLE, {DelayTS, Key}).
 
 get_first_delay() ->
-    case ets:first(?INDEX_TABLE) of
+    case ets:first(?TS_INDEX_TABLE) of
         '$end_of_table' ->
             undefined;
         DelayTS ->
-            % The DelayTS is both the delay and the key prefix.
+            % Return DelayTS both as DelayTS and as key
             {DelayTS, DelayTS}
     end.
 
 get_many(DelayTS) ->
-    IndexEntries = ets:lookup(?INDEX_TABLE, DelayTS),
+    IndexEntries = ets:lookup(?KEY_INDEX_TABLE, DelayTS),
     Entries = [leveled_bookie:book_get(?BOOKIE, ?BUCKET, K) || {_DeliveryTS, K} <- IndexEntries],
     logger:critical("get_many: DelayTS=~p, NumberOfEntries=~p", [DelayTS, length(Entries)]),
     [Entry || {_Key, Value} <- Entries,
               Entry <- [binary_to_term(Value)]].
 
 delete(DeliveryTS) ->
-    IndexEntries = ets:lookup(?INDEX_TABLE, DeliveryTS),
-    [leveled_bookie:book_delete(?BOOKIE, ?BUCKET, Key, []) || {{_DeliveryTS, Key}} <- IndexEntries].
+    IndexEntries = ets:lookup(?KEY_INDEX_TABLE, DeliveryTS),
+    [leveled_bookie:book_delete(?BOOKIE, ?BUCKET, Key, []) || {_DeliveryTS, Key} <- IndexEntries].
 
 delete_index(DeliveryTS) ->
-    ets:delete(?INDEX_TABLE, DeliveryTS).
+    ets:delete(?TS_INDEX_TABLE, DeliveryTS),
+    ets:delete(?KEY_INDEX_TABLE, DeliveryTS).
 
 make_key(DelayTS) ->
     <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.
@@ -124,8 +129,13 @@ increase_counter(ExName) ->
 %% Creates the index table and populates it from any keys already present
 %% in leveled (relevant on restart with existing data).
 init_index() ->
-    ets:new(?INDEX_TABLE, [named_table, ordered_set, public]),
-    FoldFun = fun(_B, <<DelayTS:64/big, _:128>> = Key, _Acc) -> ets:insert(?INDEX_TABLE, {DelayTS, Key}), ok end,
+    ets:new(?TS_INDEX_TABLE, [named_table, ordered_set, public]),
+    ets:new(?KEY_INDEX_TABLE, [named_table, bag, public]),
+    FoldFun = fun(_B, <<DelayTS:64/big, _:128>> = Key, _Acc) ->
+        ets:insert(?TS_INDEX_TABLE, {DelayTS}),
+        ets:insert(?KEY_INDEX_TABLE, {DelayTS, Key}),
+        ok
+    end,
     {async, Runner} = leveled_bookie:book_keylist(
         ?BOOKIE, ?STD_TAG, ?BUCKET, {FoldFun, ok}),
     Runner().

@@ -85,19 +85,19 @@ handle_call(_Req, _From, State) ->
 handle_cast(_C, State) ->
     {noreply, State}.
 
-handle_info({timeout, _TimerRef, {deliver, DelayKey}}, State) ->
-    case get_many(DelayKey) of
+handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
+    case get_many(Key) of
         [] ->
             rabbit_log:critical("Delayed message delivery: "
                                 "timer fired for key ~p but no deliveries were found",
-                                [DelayKey]),
-            delete_index(DelayKey);
+                                [Key]),
+            delete_index(Key);
         Deliveries ->
             rabbit_log:critical("Deliveries: ~p",
                                 [Deliveries]),
             _ = route(Deliveries, State),
-            delete(DelayKey),
-            delete_index(DelayKey)
+            delete(Key),
+            delete_index(Key)
     end,
     {noreply, State#state{timer = maybe_delay_first()}};
 handle_info(_I, State) ->
@@ -135,14 +135,13 @@ get_first_delay() ->
 
 maybe_delay_first() ->
     case get_first_delay() of
-        %% destructuring to prevent matching '$end_of_table'
-        {FirstTS, DelayKey} ->
-            %% there are messages that will expire and need to be delivered
-            Now = erlang:system_time(milli_seconds),
-            start_timer(FirstTS - Now, DelayKey);
         undefined ->
             %% nothing to do
-            not_set
+            not_set;
+        {FirstTS, Key} ->
+            %% there are messages that will expire and need to be delivered
+            Now = erlang:system_time(milli_seconds),
+            start_timer(FirstTS - Now, Key)
     end.
 
 route(Deliveries, State) ->
@@ -182,8 +181,8 @@ internal_delay_message(CurrTimer, Exchange, Message, Delay) ->
                     %% Current timer lasts longer that new message delay
                     _ = erlang:cancel_timer(CurrTimer),
                     % TODO: Can we save some time getting the key from before?
-                    {_, Key} = get_first_delay(),
-                    {ok, start_timer(Delay, Key)};
+                    {DelayTS, _Key} = get_first_delay(),
+                    {ok, start_timer(Delay, DelayTS)};
                 _ ->
                     %% Timer is set to expire sooner than this
                     %% message's scheduled delivery time.
@@ -207,8 +206,8 @@ store_delayed(DelayTS, Exchange, Message) ->
                         end}
         ).
 
-start_timer(Delay, DelayKey) ->
-    erlang:start_timer(erlang:max(0, Delay), self(), {deliver, DelayKey}).
+start_timer(Delay, Key) ->
+    erlang:start_timer(erlang:max(0, Delay), self(), {deliver, Key}).
 
 setup() ->
     rabbit_khepri:handle_fallback(
