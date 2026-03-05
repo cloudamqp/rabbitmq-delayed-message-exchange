@@ -85,14 +85,19 @@ handle_call(_Req, _From, State) ->
 handle_cast(_C, State) ->
     {noreply, State}.
 
-handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
-    case get_many(Key) of
+handle_info({timeout, _TimerRef, {deliver, DelayKey}}, State) ->
+    case get_many(DelayKey) of
         [] ->
-            delete_index(Key);
+            rabbit_log:critical("Delayed message delivery: "
+                                "timer fired for key ~p but no deliveries were found",
+                                [DelayKey]),
+            delete_index(DelayKey);
         Deliveries ->
+            rabbit_log:critical("Deliveries: ~p",
+                                [Deliveries]),
             _ = route(Deliveries, State),
-            delete(Key),
-            delete_index(Key)
+            delete(DelayKey),
+            delete_index(DelayKey)
     end,
     {noreply, State#state{timer = maybe_delay_first()}};
 handle_info(_I, State) ->
@@ -119,7 +124,7 @@ delete(Key) ->
 delete_index(Key) ->
     rabbit_khepri:handle_fallback(
             #{mnesia => fun() -> rabbit_delayed_message_mnesia:delete_index(Key) end,
-              khepri => fun() -> ok end}
+              khepri => fun() -> rabbit_delayed_message_leveled:delete_index(Key) end}
         ).
 
 get_first_delay() ->
@@ -202,8 +207,8 @@ store_delayed(DelayTS, Exchange, Message) ->
                         end}
         ).
 
-start_timer(Delay, Key) ->
-    erlang:start_timer(erlang:max(0, Delay), self(), {deliver, Key}).
+start_timer(Delay, DelayKey) ->
+    erlang:start_timer(erlang:max(0, Delay), self(), {deliver, DelayKey}).
 
 setup() ->
     rabbit_khepri:handle_fallback(

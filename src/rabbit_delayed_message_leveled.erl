@@ -14,6 +14,10 @@
 -define(BOOKIE(Bookie), persistent_term:put({?MODULE, bookie}, Bookie)).
 -define(BOOKIE, persistent_term:get({?MODULE, bookie}, undefined)).
 
+%% ordered_set ETS table keyed by <<TS:64/big, Random:16/binary>>.
+%% Big-endian byte order means ets:first/1 always returns the minimum-timestamp key.
+-define(INDEX_TABLE, rabbit_delayed_message_leveled_index).
+
 -export([setup/0,
          disable_plugin/0,
          messages_delayed/1,
@@ -38,9 +42,11 @@ setup() ->
     ok = filelib:ensure_path(Path),
     {ok, Bookie} = leveled_bookie:book_start([{root_path, Path}]),
     ?BOOKIE(Bookie),
+    init_index(),
     init_counters().
 
 disable_plugin() ->
+    catch ets:delete(?INDEX_TABLE),
     leveled_bookie:book_close(?BOOKIE).
 
 messages_delayed(Exchange) ->
@@ -48,48 +54,33 @@ messages_delayed(Exchange) ->
 
 store_delay(DelayTS, Exchange, Message) ->
     increase_counter(Exchange#exchange.name),
-    _ = leveled_bookie:book_put(?BOOKIE, ?BUCKET, make_key(DelayTS),
-                                term_to_binary({Exchange, Message}), []).
+    Key = make_key(DelayTS),
+    leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
+                                term_to_binary({Exchange, Message}), []),
+    ets:insert(?INDEX_TABLE, {DelayTS, Key}).
 
 get_first_delay() ->
-    FoldFun = fun(_B, K, _Acc) -> throw({first_key, K}) end,
-    {async, Runner} = leveled_bookie:book_keylist(
-        ?BOOKIE, ?STD_TAG, ?BUCKET, {FoldFun, not_found}),
-    try Runner() of
-        not_found ->
-            undefined
-    catch
-        throw:{first_key, <<TS:64/big, _:16/binary>> = FirstKey} ->
-            {TS, FirstKey}
+    case ets:first(?INDEX_TABLE) of
+        '$end_of_table' ->
+            undefined;
+        DelayTS ->
+            % The DelayTS is both the delay and the key prefix.
+            {DelayTS, DelayTS}
     end.
 
-get_many(<<DeliveryTS:64/big, _:16/binary>>) ->
-    StartKey = <<DeliveryTS:64/big, 0:128>>,
-    EndKey   = <<DeliveryTS:64/big, 255, 255, 255, 255, 255, 255, 255, 255,
-                                    255, 255, 255, 255, 255, 255, 255, 255>>,
-    FoldFun = fun(_B, K, V, Acc) -> [{K, V} | Acc] end,
-    {async, Runner} = leveled_bookie:book_objectfold(
-        ?BOOKIE, ?STD_TAG, ?BUCKET, {StartKey, EndKey}, {FoldFun, []}, false),
-    Entries = Runner(),
+get_many(DelayTS) ->
+    IndexEntries = ets:lookup(?INDEX_TABLE, DelayTS),
+    Entries = [leveled_bookie:book_get(?BOOKIE, ?BUCKET, K) || {_DeliveryTS, K} <- IndexEntries],
+    logger:critical("get_many: DelayTS=~p, NumberOfEntries=~p", [DelayTS, length(Entries)]),
     [Entry || {_Key, Value} <- Entries,
               Entry <- [binary_to_term(Value)]].
 
-delete(<<DeliveryTS:64/big, _:16/binary>>) ->
-    StartKey = <<DeliveryTS:64/big, 0:128>>,
-    EndKey   = <<DeliveryTS:64/big, 255, 255, 255, 255, 255, 255, 255, 255,
-                                    255, 255, 255, 255, 255, 255, 255, 255>>,
-    FoldFun = fun(B, K, Term, _Acc) ->
-                      Res = leveled_bookie:book_delete(?BOOKIE, B, K, []),
-                      {Exchange, _} = binary_to_term(Term),
-                      decrease_counter(Exchange#exchange.name),
-                      Res
-              end,
-    {async, Runner} = leveled_bookie:book_objectfold(
-        ?BOOKIE, ?STD_TAG, ?BUCKET, {StartKey, EndKey}, {FoldFun, []}, false),
-     Runner().
+delete(DeliveryTS) ->
+    IndexEntries = ets:lookup(?INDEX_TABLE, DeliveryTS),
+    [leveled_bookie:book_delete(?BOOKIE, ?BUCKET, Key, []) || {{_DeliveryTS, Key}} <- IndexEntries].
 
-delete_index(_Key) ->
-    ok.
+delete_index(DeliveryTS) ->
+    ets:delete(?INDEX_TABLE, DeliveryTS).
 
 make_key(DelayTS) ->
     <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.
@@ -109,13 +100,10 @@ counter_key(ExName) ->
     {?MODULE, counter, ExName}.
 
 get_counter(ExName) ->
-    rabbit_log:critical("Getting counter for exchange ~p", [ExName]),
     case persistent_term:get(counter_key(ExName), undefined) of
         undefined -> not_found;
         Atomic ->
-            Res = atomics:get(Atomic, 1),
-            rabbit_log:critical("Result ~p", [Res]),
-            Res
+            atomics:get(Atomic, 1)
     end.
 
 increase_counter(ExName) ->
@@ -129,13 +117,19 @@ increase_counter(ExName) ->
             atomics:add(Counter, 1, 1)
     end.
 
-decrease_counter(ExName) ->
-    Counter = persistent_term:get(counter_key(ExName), undefined),
-    atomics:sub(Counter, 1, 1).
-
 % --------------------------------------------
 % Internal functions
 % --------------------------------------------
+
+%% Creates the index table and populates it from any keys already present
+%% in leveled (relevant on restart with existing data).
+init_index() ->
+    ets:new(?INDEX_TABLE, [named_table, ordered_set, public]),
+    FoldFun = fun(_B, <<DelayTS:64/big, _:128>> = Key, _Acc) -> ets:insert(?INDEX_TABLE, {DelayTS, Key}), ok end,
+    {async, Runner} = leveled_bookie:book_keylist(
+        ?BOOKIE, ?STD_TAG, ?BUCKET, {FoldFun, ok}),
+    Runner().
+
 delayed_per_exchange() ->
     FoldFun = fun(_B, _K, Term, Acc) ->
                       % TODO: oof, having to transform each term aint good
