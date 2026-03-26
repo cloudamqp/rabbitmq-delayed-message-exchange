@@ -16,8 +16,7 @@
 
 %% ordered_set ETS table keyed by <<TS:64/big, Random:16/binary>>.
 %% Big-endian byte order means ets:first/1 always returns the minimum-timestamp key.
--define(TS_INDEX_TABLE, rabbit_delayed_message_leveled_ts_index).
--define(KEY_INDEX_TABLE, rabbit_delayed_message_leveled_key_index).
+-define(INDEX_TABLE, rabbit_delayed_message_leveled_key_index).
 
 -export([setup/0,
          disable_plugin/0,
@@ -47,45 +46,63 @@ setup() ->
     init_counters().
 
 disable_plugin() ->
-    catch ets:delete(?TS_INDEX_TABLE),
-    catch ets:delete(?KEY_INDEX_TABLE),
+    catch ets:delete(?INDEX_TABLE),
     leveled_bookie:book_close(?BOOKIE).
 
 messages_delayed(Exchange) ->
     get_counter(Exchange#exchange.name).
 
 store_delay(DelayTS, Exchange, Message) ->
-    rabbit_log:critical("store_delay: DelayTS=~p", [DelayTS]),
     increase_counter(Exchange#exchange.name),
     Key = make_key(DelayTS),
     leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
                                 term_to_binary({Exchange, Message}), []),
-    ets:insert(?TS_INDEX_TABLE, {DelayTS}),
-    ets:insert(?KEY_INDEX_TABLE, {DelayTS, Key}).
+    % Insert `{DelayTS, Key}' as ETS table key (wrapped in additional `{}')
+    ets:insert(?INDEX_TABLE, {{DelayTS, Key}}).
 
 get_first_delay() ->
-    case ets:first(?TS_INDEX_TABLE) of
+    case ets:first(?INDEX_TABLE) of
         '$end_of_table' ->
             undefined;
-        DelayTS ->
+        {DelayTS, _Key} ->
             % Return DelayTS both as DelayTS and as key
+            % Mnesia uses the _Key, but on leveled implementation we use the
+            % DelayTS to lookup the entries to deliver
             {DelayTS, DelayTS}
     end.
 
 get_many(DelayTS) ->
-    IndexEntries = ets:lookup(?KEY_INDEX_TABLE, DelayTS),
-    Entries = [leveled_bookie:book_get(?BOOKIE, ?BUCKET, K) || {_DeliveryTS, K} <- IndexEntries],
-    logger:critical("get_many: DelayTS=~p, NumberOfEntries=~p", [DelayTS, length(Entries)]),
-    [Entry || {_Key, Value} <- Entries,
+    IndexEntries = get_many(DelayTS, []),
+    Results = [leveled_bookie:book_get(?BOOKIE, ?BUCKET, Key) || {_DeliveryTS, Key} <- IndexEntries],
+    [Entry || {ok, Value} <- Results,
               Entry <- [binary_to_term(Value)]].
 
-delete(DeliveryTS) ->
-    IndexEntries = ets:lookup(?KEY_INDEX_TABLE, DeliveryTS),
-    [leveled_bookie:book_delete(?BOOKIE, ?BUCKET, Key, []) || {_DeliveryTS, Key} <- IndexEntries].
+get_many(DelayTS, Acc) ->
+    case ets:first(?INDEX_TABLE) of
+        '$end_of_table' ->
+            lists:reverse(Acc);
+        {FirstDelay, _Key} = IndexEntry when FirstDelay =:= DelayTS ->
+            % We need to delete as we go to avoid infinite loop
+            ets:delete(?INDEX_TABLE, IndexEntry),
+            get_many(DelayTS, [IndexEntry| Acc]);
+        _ ->
+            lists:reverse(Acc)
+    end.
+
+delete(DelayTS) ->
+    case ets:first(?INDEX_TABLE) of
+        '$end_of_table' ->
+            ok;
+        {FirstDelay, Key} = IndexEntry when FirstDelay =:= DelayTS ->
+            % We need to delete as we go to avoid infinite loop
+            ets:delete(?INDEX_TABLE, IndexEntry),
+            leveled_bookie:book_delete(?BOOKIE, ?BUCKET, Key, []);
+        _ ->
+            ok
+    end.
 
 delete_index(DeliveryTS) ->
-    ets:delete(?TS_INDEX_TABLE, DeliveryTS),
-    ets:delete(?KEY_INDEX_TABLE, DeliveryTS).
+    ets:delete(?INDEX_TABLE, DeliveryTS).
 
 make_key(DelayTS) ->
     <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.
@@ -129,11 +146,9 @@ increase_counter(ExName) ->
 %% Creates the index table and populates it from any keys already present
 %% in leveled (relevant on restart with existing data).
 init_index() ->
-    ets:new(?TS_INDEX_TABLE, [named_table, ordered_set, public]),
-    ets:new(?KEY_INDEX_TABLE, [named_table, bag, public]),
+    ets:new(?INDEX_TABLE, [named_table, ordered_set, public]),
     FoldFun = fun(_B, <<DelayTS:64/big, _:128>> = Key, _Acc) ->
-        ets:insert(?TS_INDEX_TABLE, {DelayTS}),
-        ets:insert(?KEY_INDEX_TABLE, {DelayTS, Key}),
+        ets:insert(?INDEX_TABLE, {{DelayTS, Key}}),
         ok
     end,
     {async, Runner} = leveled_bookie:book_keylist(
