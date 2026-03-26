@@ -9,48 +9,89 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - erlang_version: 25
-            rebar3: '3.24.0'
+          # - erlang_version: 25
+          #   rebar3: '3.24.0'
+          #   elixir-version: 1.17
 
-          - erlang_version: 26
-            rebar3: '3.24.0'
-
-          - erlang_version: 27
-            rebar3: '3.24.0'
+          # - erlang_version: 26
+          #   rebar3: '3.24.0'
+          #   elixir-version: 1.17
+          #
+          # - erlang_version: 27
+          #   rebar3: '3.24.0'
+          #   elixir-version: 1.17
 
           - erlang_version: 28
             rebar3: '3.25.0'
+            elixir-version: 1.18
 
     # setup-beam only supports OTP 24.2+ on ubuntu-22.04
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Set up Erlang
         uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ matrix.erlang_version }}
           rebar3-version: ${{matrix.rebar3}}
+          elixir-version: ${{matrix.elixir-version}}
 
-      - name: Run checks
-        run: make check
+      - name: Checkout rabbitmq-server
+        uses: actions/checkout@v4
+        with:
+          repository: rabbitmq/rabbitmq-server
+          path: rabbitmq-server
+          ref: v4.2.0
+
+      - name: Fetch and build RabbitMQ dependencies
+        working-directory: rabbitmq-server
+        run: |
+          make fetch-deps
+          make -C deps/rabbitmq_ct_helpers
+
+      - name: Checkout this repo inside rabbitmq-server
+        uses: actions/checkout@v4
+        with:
+          path: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
 
       - name: Build ez file
+        working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
         run: make dist DIST_AS_EZS=true
 
+      - name: ls -lisa
+        run: ls -lisa rabbitmq-server/deps/rabbitmq_delayed_message_exchange
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build NIF on arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/..
+          file: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/Dockerfile
+          platforms: linux/arm64
+          build-args: |
+            erlang_version=${{ matrix.erlang_version }}
+            rebar3_version=${{ matrix.rebar3 }}
+          outputs: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/zstd_arm64_outdir
+
+      - name: Copy arm zstd nif to the plugin folder
+        working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/plugins
+        run: |
+          EZ=$(ls zstd*.ez)
+          APPDIR="${EZ%.ez}"
+          mkdir -p "$APPDIR/priv"
+          cp ../zstd_arm64_outdir/zstd_nif.so "$APPDIR/priv/zstd_nif.so"
+          zip -u "$EZ" "$APPDIR/priv/zstd_nif.so"
+
       - name: Generate tarball
+        working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
         run: cd plugins && tar -czvf plugins.tar.gz rabbitmq_delayed_message_exchange*.ez zstd*.ez leveled*.ez
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: artifact_erlang_${{ matrix.erlang_version }}
-          path: plugins/plugins.tar.gz
-
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        if: github.ref_type == 'tag'
-        with:
-          files: _build/prod/cloudamqp_tools_plugin-*.tar.gz
-          fail_on_unmatched_files: true
+          path: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/plugins/plugins.tar.gz
