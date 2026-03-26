@@ -216,9 +216,7 @@ e2e_test0(Config, Msgs) ->
 
     [] = get_publish_out_stat(Config),
 
-    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_log, critical, ["Start publishing messages with delays: ~p", [Msgs]]),
     publish_messages(Chan, Ex, Msgs),
-    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_log, critical, ["Done publishing messages with delays: ~p", [Msgs]]),
 
     {ok, Result} = consume(Chan, Q, Msgs),
     Sorted = lists:sort(Msgs),

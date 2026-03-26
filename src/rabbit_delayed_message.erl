@@ -88,13 +88,8 @@ handle_cast(_C, State) ->
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
     case get_many(Key) of
         [] ->
-            rabbit_log:critical("Delayed message delivery: "
-                                "timer fired for key ~p but no deliveries were found",
-                                [Key]),
             delete_index(Key);
         Deliveries ->
-            rabbit_log:critical("Deliveries: ~p",
-                                [Deliveries]),
             _ = route(Deliveries, State),
             delete(Key),
             delete_index(Key)
