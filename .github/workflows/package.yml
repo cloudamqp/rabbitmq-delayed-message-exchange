@@ -1,0 +1,56 @@
+name: Package
+on:
+  push:
+
+jobs:
+  build:
+    name: Build package for Erlang ${{ matrix.erlang_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - erlang_version: 25
+            rebar3: '3.24.0'
+
+          - erlang_version: 26
+            rebar3: '3.24.0'
+
+          - erlang_version: 27
+            rebar3: '3.24.0'
+
+          - erlang_version: 28
+            rebar3: '3.25.0'
+
+    # setup-beam only supports OTP 24.2+ on ubuntu-22.04
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.erlang_version }}
+          rebar3-version: ${{matrix.rebar3}}
+
+      - name: Run checks
+        run: make check
+
+      - name: Build ez file
+        run: make dist DIST_AS_EZS=true
+
+      - name: Generate tarball
+        run: cd plugins && tar -czvf plugins.tar.gz rabbitmq_delayed_message_exchange*.ez zstd*.ez leveled*.ez
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact_erlang_${{ matrix.erlang_version }}
+          path: plugins/plugins.tar.gz
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        if: github.ref_type == 'tag'
+        with:
+          files: _build/prod/cloudamqp_tools_plugin-*.tar.gz
+          fail_on_unmatched_files: true
