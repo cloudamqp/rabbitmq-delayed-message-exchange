@@ -57,38 +57,20 @@ jobs:
         working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
         run: make dist DIST_AS_EZS=true
 
-      - name: ls -lisa
-        run: ls -lisa rabbitmq-server/deps/rabbitmq_delayed_message_exchange
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build NIF on arm64
-        uses: docker/build-push-action@v6
-        with:
-          context: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/..
-          file: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/Dockerfile
-          platforms: linux/arm64
-          build-args: |
-            erlang_version=${{ matrix.erlang_version }}
-            rebar3_version=${{ matrix.rebar3 }}
-          outputs: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/zstd_arm64_outdir
-
-      - name: Copy arm zstd nif to the plugin folder
+      - name: Remove lz4 and zstd from leveled app dependencies
         working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/plugins
         run: |
-          EZ=$(ls zstd*.ez)
+          EZ=$(ls leveled*.ez)
           APPDIR="${EZ%.ez}"
-          mkdir -p "$APPDIR/priv"
-          cp ../zstd_arm64_outdir/zstd_nif.so "$APPDIR/priv/zstd_nif.so"
-          zip -u "$EZ" "$APPDIR/priv/zstd_nif.so"
+          mkdir -p "$APPDIR/ebin"
+          unzip -p "$EZ" "$APPDIR/ebin/leveled.app" > "$APPDIR/ebin/leveled.app"
+          sed -i 's/,zstd//' "$APPDIR/ebin/leveled.app"
+          sed -i 's/,lz4//' "$APPDIR/ebin/leveled.app"
+          zip -u "$EZ" "$APPDIR/ebin/leveled.app"
 
       - name: Generate tarball
         working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
-        run: cd plugins && tar -czvf plugins.tar.gz rabbitmq_delayed_message_exchange*.ez zstd*.ez leveled*.ez
+        run: cd plugins && tar -czvf plugins.tar.gz rabbitmq_delayed_message_exchange*.ez leveled*.ez
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
