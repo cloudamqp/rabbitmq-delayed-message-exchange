@@ -15,13 +15,12 @@ dep_rabbit                     = git_rmq-subfolder rabbitmq-server $(RABBITMQ_VE
 dep_rabbitmq_ct_client_helpers = git_rmq-subfolder rabbitmq-ct-client-helpers $(RABBITMQ_VERSION)
 dep_rabbitmq_ct_helpers        = git_rmq-subfolder rabbitmq-ct-helpers $(RABBITMQ_VERSION)
 dep_leveled                = git https://github.com/martinsumner/leveled.git develop-3.4
-dep_lz4                    = git https://github.com/OpenRiak/erlang-lz4.git openriak-3.4
-dep_zstd                   = git https://github.com/OpenRiak/zstd-erlang.git openriak-3.2
-
-# leveled_codec.erl calls lz4 and zstd functions directly, so both NIF libs
-# must be declared here so they end up in the top-level deps/ and code path.
-# eqwalizer_support is a type-checking tool; suppress it across all sub-builds.
-DEPS = rabbit_common rabbit leveled lz4 zstd
+# lz4 and zstd are omitted from DEPS intentionally: OTP 28 ships its own stdlib
+# zstd module which clashes with the OpenRiak NIF, and RabbitMQ 4.2.0 ships an
+# incompatible lz4. leveled is configured to use no compression, so neither NIF
+# is needed at runtime. They are still fetched transitively by leveled for
+# compilation but must not be started as OTP applications.
+DEPS = rabbit_common rabbit leveled
 export IGNORE_DEPS += eqwalizer_support
 TEST_DEPS = ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck eflame
 dep_ct_helper = git https://github.com/extend/ct_helper.git master
@@ -46,6 +45,16 @@ ERLANG_MK_COMMIT = rabbitmq-tmp
 
 include rabbitmq-components.mk
 include erlang.mk
+
+# After deps are fetched, strip lz4 and zstd from leveled's OTP application
+# dependency list so they are never started. See comment above DEPS for why.
+deps:: patch-leveled-app
+
+patch-leveled-app:
+	$(verbose) if [ -f $(DEPS_DIR)/leveled/ebin/leveled.app ]; then \
+		sed -i 's/,zstd//' $(DEPS_DIR)/leveled/ebin/leveled.app; \
+		sed -i 's/,lz4//' $(DEPS_DIR)/leveled/ebin/leveled.app; \
+	fi
 
 benchmarks: test-build
 	$(verbose) mkdir -p $(BENCH_LOGS_DIR)
