@@ -1,6 +1,7 @@
 name: Package
 on:
   push:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -9,17 +10,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # - erlang_version: 25
-          #   rebar3: '3.24.0'
-          #   elixir-version: 1.17
-
-          # - erlang_version: 26
-          #   rebar3: '3.24.0'
-          #   elixir-version: 1.17
-          #
-          # - erlang_version: 27
-          #   rebar3: '3.24.0'
-          #   elixir-version: 1.17
 
           - erlang_version: 28
             rebar3: '3.25.0'
