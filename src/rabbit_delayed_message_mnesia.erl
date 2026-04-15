@@ -3,6 +3,10 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include("rabbit_delayed_message.hrl").
 
+-rabbit_mnesia_tables_to_khepri_db(
+   [{{mfa, rabbit_delayed_message_mnesia, table_names, []},
+     rabbit_delayed_message_m2k_converter}]).
+
 -export([setup/0,
          disable_plugin/0,
          messages_delayed/1,
@@ -15,7 +19,8 @@
 
 %% For testing, debugging and manual use
 -export([table_name/0,
-         index_table_name/0]).
+         index_table_name/0,
+         table_names/0]).
 
 %%--------------------------------------------------------------------
 
@@ -94,6 +99,12 @@ table_name() ->
 
 index_table_name() ->
     ?INDEX_TABLE_NAME.
+
+%% Returns the names of both Mnesia tables managed by this module. Used as an
+%% MFA target in the rabbit_mnesia_tables_to_khepri_db attribute, so it must
+%% not assume any RabbitMQ subsystem is running.
+table_names() ->
+    [?TABLE_NAME, ?INDEX_TABLE_NAME].
 
 % DO I REALLY NEED THIS??
 % ensure_mnesia_running() ->

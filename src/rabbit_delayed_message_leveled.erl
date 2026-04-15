@@ -38,7 +38,7 @@
 -define(BUCKET, <<"x-delayed-messages">>).
 
 setup() ->
-    Path = filename:join([rabbit_mnesia:dir(), "rabbit_delayed_message", "leveled"]),
+    Path = filename:join([rabbit_khepri:dir(), "rabbit_delayed_message", "leveled"]),
     ok = filelib:ensure_path(Path),
     {ok, Bookie} = leveled_bookie:book_start([{root_path, Path}]),
     ?BOOKIE(Bookie),

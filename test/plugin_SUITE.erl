@@ -15,13 +15,15 @@
 all() ->
     [
       {group, mnesia},
-      {group, leveled}
+      {group, leveled},
+      {group, mnesia_to_khepri}
     ].
 
 groups() ->
     [
       {mnesia, [], [{group, non_parallel_tests}, {group, fine_stats}]},
       {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}]},
+      {mnesia_to_khepri, [], [mnesia_to_khepri_migration]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
@@ -73,6 +75,15 @@ init_per_group(leveled, Config) ->
         ]
     ),
     run_broker_and_clients(Config1);
+init_per_group(mnesia_to_khepri, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-m2k")}
+        ]
+    ),
+    run_broker_and_clients(Config1);
 init_per_group(fine_stats, Config) ->
     CollectStatsOrig = get_collect_stats(Config),
     set_collect_stats(Config, fine),
@@ -84,6 +95,8 @@ init_per_group(_, Config) ->
 end_per_group(mnesia, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(leveled, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(mnesia_to_khepri, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
@@ -371,6 +384,44 @@ string_delay_header(Config) ->
     Sorted = lists:sort(Msgs),
     ?assertEqual(Sorted, Result),
 
+    ok.
+
+mnesia_to_khepri_migration(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    %% Use publisher confirms to ensure messages are persisted in Mnesia
+    %% before triggering the migration.
+    amqp_channel:call(Chan, #'confirm.select'{}),
+
+    %% Publish messages with a delay long enough to survive the migration
+    %% and node restart regardless of how quickly those steps complete.
+    Msgs = [30000, 30000, 30000],
+    publish_messages(Chan, Ex, Msgs),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+
+    %% Enable khepri_db, which runs the Mnesia-to-Leveled migration for the
+    %% delayed-message tables via rabbit_delayed_message_m2k_converter.
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
+
+    %% Restart the node so the plugin gen_server re-initialises using the
+    %% Leveled backend and rebuilds the scheduling index from the migrated data.
+    rabbit_ct_broker_helpers:restart_node(Config, 0),
+
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+
+    {ok, Result} = consume(Chan2, Q, Msgs),
+    Sorted = lists:sort(Msgs),
+    ?assertEqual(Sorted, Result),
+
+    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
     ok.
 
 setup_fabric(Chan, ExDeclare, QueueDeclare) ->
