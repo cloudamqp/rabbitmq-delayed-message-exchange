@@ -5,86 +5,83 @@
 %%  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(rabbit_delayed_message_m2k_converter).
-% -behaviour(mnesia_to_khepri_converter).
-%
-% -include_lib("rabbit_common/include/rabbit.hrl").
-% -include_lib("kernel/include/logger.hrl").
-% -include_lib("khepri_mnesia_migration/src/kmm_logging.hrl").
-% -include("rabbit_delayed_message.hrl").
-%
-%
-% -export([init_copy_to_khepri/3,
-%          copy_to_khepri/3,
-%          delete_from_khepri/3,
-%          clear_data_in_khepri/1]).
-%
-% -record(?MODULE, {}).
-%
-% -spec init_copy_to_khepri(StoreId, MigrationId, Tables) -> Ret when
-%       StoreId :: khepri:store_id(),
-%       MigrationId :: mnesia_to_khepri:migration_id(),
-%       Tables :: [mnesia_to_khepri:mnesia_table()],
-%       Ret :: {ok, Priv},
-%       Priv :: #?MODULE{}.
-% init_copy_to_khepri(_StoreId, _MigrationId, _Tables) ->
-%     State = #?MODULE{},
-%     {ok, State}.
-%
-% -spec copy_to_khepri(Table, Record, State) -> Ret when
-%       Table :: mnesia_to_khepri:mnesia_table(),
-%       Record :: tuple(),
-%       State :: rabbit_db_m2k_converter:state(),
-%       Ret :: {ok, NewState} | {error, Reason},
-%       NewState :: rabbit_db_m2k_converter:state(),
-%       Reason :: any().
-% copy_to_khepri(?TABLE_NAME = Table, Record,
-%                State) ->
-%     ?LOG_DEBUG(
-%        "Mnesia->Leveled (khepri alternative) data copy: [~0p] key: ~0p",
-%        [Table, Key],
-%        #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
-%     Path = rabbit_db_lvc_exchange:khepri_lvc_path(Key, RK),
-%     rabbit_db_m2k_converter:with_correlation_id(
-%       fun(CorrId) ->
-%               Extra = #{async => CorrId},
-%               ?LOG_DEBUG(
-%                  "Mnesia->Khepri data copy: [~0p] path: ~0p corr: ~0p",
-%                  [Table, Path, CorrId],
-%                  #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
-%               rabbit_khepri:put(Path, Content, Extra)
-%       end, State);
-% copy_to_khepri(Table, Record, State) ->
-%     ?LOG_DEBUG("Mnesia->Khepri unexpected record table ~0p record ~0p state ~0p",
-%                [Table, Record, State]),
-%     {error, unexpected_record}.
-%
-% -spec delete_from_khepri(Table, Key, State) -> Ret when
-%       Table :: mnesia_to_khepri:mnesia_table(),
-%       Key :: any(),
-%       State :: rabbit_db_m2k_converter:state(),
-%       Ret :: {ok, NewState} | {error, Reason},
-%       NewState :: rabbit_db_m2k_converter:state(),
-%       Reason :: any().
-% delete_from_khepri(?TABLE_NAME = Table, #cachekey{exchange = Key, routing_key = RK}, State) ->
-%     ?LOG_DEBUG(
-%        "Mnesia->Khepri data delete: [~0p] key: ~0p",
-%        [Table, Key],
-%        #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
-%     Path = rabbit_db_lvc_exchange:khepri_lvc_path(Key, RK),
-%     rabbit_db_m2k_converter:with_correlation_id(
-%       fun(CorrId) ->
-%               Extra = #{async => CorrId},
-%               ?LOG_DEBUG(
-%                  "Mnesia->Khepri data delete: [~0p] path: ~0p corr: ~0p",
-%                  [Table, Path, CorrId],
-%                  #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
-%               rabbit_khepri:delete(Path, Extra)
-%       end, State).
-%
-% clear_data_in_khepri(?TABLE_NAME) ->
-%     case rabbit_khepri:delete(rabbit_db_lvc_exchange:khepri_lvc_path()) of
-%         ok ->
-%             ok;
-%         Error ->
-%             throw(Error)
-%     end.
+
+-behaviour(mnesia_to_khepri_converter).
+
+-include_lib("kernel/include/logger.hrl").
+-include_lib("khepri_mnesia_migration/src/kmm_logging.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
+-include("rabbit_delayed_message.hrl").
+
+-export([init_copy_to_khepri/3,
+         copy_to_khepri/3,
+         delete_from_khepri/3,
+         clear_data_in_khepri/1]).
+
+-record(?MODULE, {}).
+
+-define(BUCKET, <<"x-delayed-messages">>).
+
+-spec init_copy_to_khepri(StoreId, MigrationId, Tables) -> Ret when
+      StoreId :: khepri:store_id(),
+      MigrationId :: mnesia_to_khepri:migration_id(),
+      Tables :: [mnesia_to_khepri:mnesia_table()],
+      Ret :: {ok, Priv},
+      Priv :: #?MODULE{}.
+init_copy_to_khepri(_StoreId, _MigrationId, _Tables) ->
+    Path = filename:join([rabbit_khepri:dir(), "rabbit_delayed_message", "leveled"]),
+    ok = filelib:ensure_path(Path),
+    {ok, Bookie} = leveled_bookie:book_start([{root_path, Path}]),
+    put({?MODULE, bookie}, Bookie),
+    {ok, #?MODULE{}}.
+
+-spec copy_to_khepri(Table, Record, State) -> Ret when
+      Table :: mnesia_to_khepri:mnesia_table(),
+      Record :: tuple(),
+      State :: rabbit_db_m2k_converter:state(),
+      Ret :: {ok, NewState} | {error, Reason},
+      NewState :: rabbit_db_m2k_converter:state(),
+      Reason :: any().
+copy_to_khepri(Table,
+               #delay_entry{delay_key = #delay_key{timestamp = TS,
+                                                   exchange  = Exchange},
+                            delivery = Delivery,
+                            ref      = Ref},
+               State) ->
+    ?LOG_DEBUG(
+       "Mnesia->Leveled data copy: [~0p] ts: ~0p exchange: ~0p",
+       [Table, TS, Exchange#exchange.name],
+       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
+    %% Derive a deterministic Leveled key from the Mnesia record so that
+    %% a retried migration does not produce duplicate entries.
+    KeySuffix = crypto:hash(md5, term_to_binary({TS, Exchange, Ref})),
+    Key = <<TS:64/big, KeySuffix/binary>>,
+    Bookie = get({?MODULE, bookie}),
+    ok = leveled_bookie:book_put(Bookie, ?BUCKET, Key,
+                                 term_to_binary({Exchange, Delivery}), []),
+    {ok, State};
+copy_to_khepri(_Table, #delay_index{}, State) ->
+    %% Index entries are rebuilt from the Leveled key-set on next startup.
+    {ok, State};
+copy_to_khepri(Table, Record, _State) ->
+    ?LOG_DEBUG(
+       "Mnesia->Leveled unexpected record table ~0p record ~0p",
+       [Table, Record],
+       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
+    {error, unexpected_record}.
+
+-spec delete_from_khepri(Table, Key, State) -> Ret when
+      Table :: mnesia_to_khepri:mnesia_table(),
+      Key :: any(),
+      State :: rabbit_db_m2k_converter:state(),
+      Ret :: {ok, NewState} | {error, Reason},
+      NewState :: rabbit_db_m2k_converter:state(),
+      Reason :: any().
+%% Concurrent Mnesia deletions during migration are not propagated to the
+%% Leveled store. Pending messages may be delivered at most once more after the
+%% migration window closes.
+delete_from_khepri(_Table, _Key, State) ->
+    {ok, State}.
+
+clear_data_in_khepri(_Table) ->
+    ok.
