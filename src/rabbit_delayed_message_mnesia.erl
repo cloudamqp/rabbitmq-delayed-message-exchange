@@ -105,23 +105,3 @@ index_table_name() ->
 %% not assume any RabbitMQ subsystem is running.
 table_names() ->
     [?TABLE_NAME, ?INDEX_TABLE_NAME].
-
-% DO I REALLY NEED THIS??
-% ensure_mnesia_running() ->
-%     case rabbit_mnesia:is_running() of
-%         false ->
-%             ensure_mnesia_disc_schema(),
-%             rabbit_mnesia:start_mnesia(_CheckConsistency = false);
-%         true ->
-%             ok
-%     end.
-%
-% ensure_mnesia_disc_schema() ->
-%     case mnesia:system_info(use_dir) of
-%         true ->
-%             %% There is a disc schema already
-%             ok;
-%         false ->
-%             rabbit_misc:ensure_ok(mnesia:create_schema([node()]),
-%                                   {?MODULE, cannot_create_mnesia_schema})
-%     end.
