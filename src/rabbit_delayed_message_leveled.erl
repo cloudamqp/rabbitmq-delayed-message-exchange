@@ -61,14 +61,19 @@ store_delay(DelayTS, Exchange, Message) ->
     ets:insert(?INDEX_TABLE, {{DelayTS, Key}}).
 
 get_first_delay() ->
-    case ets:first(?INDEX_TABLE) of
-        '$end_of_table' ->
+    case ets:whereis(?INDEX_TABLE) of
+        undefined ->
             undefined;
-        {DelayTS, _Key} ->
-            % Return DelayTS both as DelayTS and as key
-            % Mnesia uses the _Key, but on leveled implementation we use the
-            % DelayTS to lookup the entries to deliver
-            {DelayTS, DelayTS}
+        _ ->
+            case ets:first(?INDEX_TABLE) of
+                '$end_of_table' ->
+                    undefined;
+                {DelayTS, _Key} ->
+                    % Return DelayTS both as DelayTS and as key
+                    % Mnesia uses the _Key, but on leveled implementation we use the
+                    % DelayTS to lookup the entries to deliver
+                    {DelayTS, DelayTS}
+            end
     end.
 
 get_many(DelayTS) ->
@@ -78,31 +83,44 @@ get_many(DelayTS) ->
               Entry <- [binary_to_term(Value)]].
 
 get_many(DelayTS, Acc) ->
-    case ets:first(?INDEX_TABLE) of
-        '$end_of_table' ->
+    case ets:whereis(?INDEX_TABLE) of
+        undefined ->
             lists:reverse(Acc);
-        {FirstDelay, _Key} = IndexEntry when FirstDelay =:= DelayTS ->
-            % We need to delete as we go to avoid infinite loop
-            ets:delete(?INDEX_TABLE, IndexEntry),
-            get_many(DelayTS, [IndexEntry| Acc]);
         _ ->
-            lists:reverse(Acc)
+            case ets:first(?INDEX_TABLE) of
+                '$end_of_table' ->
+                    lists:reverse(Acc);
+                {FirstDelay, _Key} = IndexEntry when FirstDelay =:= DelayTS ->
+                    % We need to delete as we go to avoid infinite loop
+                    ets:delete(?INDEX_TABLE, IndexEntry),
+                    get_many(DelayTS, [IndexEntry | Acc]);
+                _ ->
+                    lists:reverse(Acc)
+            end
     end.
 
 delete(DelayTS) ->
-    case ets:first(?INDEX_TABLE) of
-        '$end_of_table' ->
+    case ets:whereis(?INDEX_TABLE) of
+        undefined ->
             ok;
-        {FirstDelay, Key} = IndexEntry when FirstDelay =:= DelayTS ->
-            % We need to delete as we go to avoid infinite loop
-            ets:delete(?INDEX_TABLE, IndexEntry),
-            leveled_bookie:book_delete(?BOOKIE, ?BUCKET, Key, []);
         _ ->
-            ok
+            case ets:first(?INDEX_TABLE) of
+                '$end_of_table' ->
+                    ok;
+                {FirstDelay, Key} = IndexEntry when FirstDelay =:= DelayTS ->
+                    % We need to delete as we go to avoid infinite loop
+                    ets:delete(?INDEX_TABLE, IndexEntry),
+                    leveled_bookie:book_delete(?BOOKIE, ?BUCKET, Key, []);
+                _ ->
+                    ok
+            end
     end.
 
 delete_index(DeliveryTS) ->
-    ets:delete(?INDEX_TABLE, DeliveryTS).
+    case ets:whereis(?INDEX_TABLE) of
+        undefined -> ok;
+        _ -> ets:delete(?INDEX_TABLE, DeliveryTS)
+    end.
 
 make_key(DelayTS) ->
     <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.

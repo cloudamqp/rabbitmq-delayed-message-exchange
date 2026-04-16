@@ -11,6 +11,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
+-include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
 all() ->
     [
@@ -408,10 +409,15 @@ mnesia_to_khepri_migration(Config) ->
     %% Enable khepri_db, which runs the Mnesia-to-Leveled migration for the
     %% delayed-message tables via rabbit_delayed_message_m2k_converter.
     ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
+    ?awaitMatch(true, rabbit_ct_broker_helpers:is_feature_flag_enabled(Config, khepri_db), 5000),
 
-    %% Restart the node so the plugin gen_server re-initialises using the
-    %% Leveled backend and rebuilds the scheduling index from the migrated data.
-    rabbit_ct_broker_helpers:restart_node(Config, 0),
+    %% Restart the gen_server so it initializes the leveled backend now that
+    %% khepri_db is active: setup/0 will start the bookie, rebuild the ETS key
+    %% index from the migrated data, and arm a new delivery timer.
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, supervisor, terminate_child,
+                                      [rabbit_delayed_message_sup, rabbit_delayed_message]),
+    {ok, _} = rabbit_ct_broker_helpers:rpc(Config, 0, supervisor, restart_child,
+                                           [rabbit_delayed_message_sup, rabbit_delayed_message]),
 
     Chan2 = rabbit_ct_client_helpers:open_channel(Config),
 

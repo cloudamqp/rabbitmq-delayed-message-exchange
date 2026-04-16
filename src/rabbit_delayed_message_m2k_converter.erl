@@ -16,6 +16,7 @@
 -export([init_copy_to_khepri/3,
          copy_to_khepri/3,
          delete_from_khepri/3,
+         finish_copy_to_khepri/1,
          clear_data_in_khepri/1]).
 
 -record(?MODULE, {}).
@@ -28,7 +29,11 @@
       Tables :: [mnesia_to_khepri:mnesia_table()],
       Ret :: {ok, Priv},
       Priv :: #?MODULE{}.
-init_copy_to_khepri(_StoreId, _MigrationId, _Tables) ->
+init_copy_to_khepri(_StoreId, _MigrationId, Tables) ->
+    ?LOG_DEBUG(
+       "Mnesia->Leveled init: tables ~0p",
+       [Tables],
+       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
     Path = filename:join([rabbit_khepri:dir(), "rabbit_delayed_message", "leveled"]),
     ok = filelib:ensure_path(Path),
     {ok, Bookie} = leveled_bookie:book_start([{root_path, Path}]),
@@ -65,7 +70,7 @@ copy_to_khepri(_Table, #delay_index{}, State) ->
     {ok, State};
 copy_to_khepri(Table, Record, _State) ->
     ?LOG_DEBUG(
-       "Mnesia->Leveled unexpected record table ~0p record ~0p",
+       "Mnesia->Leveled unexpected record: table ~0p record ~0p",
        [Table, Record],
        #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
     {error, unexpected_record}.
@@ -83,5 +88,21 @@ copy_to_khepri(Table, Record, _State) ->
 delete_from_khepri(_Table, _Key, State) ->
     {ok, State}.
 
-clear_data_in_khepri(_Table) ->
+finish_copy_to_khepri(_State) ->
+    %% Close the migration bookie so all data is flushed to disk before the
+    %% gen_server opens its own bookie at the same path.
+    ?LOG_DEBUG(
+       "Mnesia->Leveled finish: closing migration bookie",
+       [],
+       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
+    case get({?MODULE, bookie}) of
+        undefined -> ok;
+        Bookie    -> ok = leveled_bookie:book_close(Bookie)
+    end.
+
+clear_data_in_khepri(Table) ->
+    ?LOG_DEBUG(
+       "Mnesia->Leveled clear_data_in_khepri: table ~0p",
+       [Table],
+       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
     ok.
