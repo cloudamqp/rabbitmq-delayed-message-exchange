@@ -40,6 +40,10 @@
 setup() ->
     Path = filename:join([rabbit_khepri:dir(), "rabbit_delayed_message", "leveled"]),
     ok = filelib:ensure_path(Path),
+    %% Close any bookie left open by the migration converter so there is at most
+    %% one bookie at this path at a time. Errors are swallowed; the data is safe
+    %% on disk via the leveled journal and will be recovered by book_start/1.
+    catch leveled_bookie:book_close(?BOOKIE),
     {ok, Bookie} = leveled_bookie:book_start([{root_path, Path}]),
     ?BOOKIE(Bookie),
     init_index(),

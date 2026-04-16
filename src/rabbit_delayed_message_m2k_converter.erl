@@ -16,7 +16,6 @@
 -export([init_copy_to_khepri/3,
          copy_to_khepri/3,
          delete_from_khepri/3,
-         finish_copy_to_khepri/1,
          clear_data_in_khepri/1]).
 
 -record(?MODULE, {}).
@@ -37,7 +36,13 @@ init_copy_to_khepri(_StoreId, _MigrationId, Tables) ->
     Path = filename:join([rabbit_khepri:dir(), "rabbit_delayed_message", "leveled"]),
     ok = filelib:ensure_path(Path),
     {ok, Bookie} = leveled_bookie:book_start([{root_path, Path}]),
-    put({?MODULE, bookie}, Bookie),
+    %% Store under the same persistent_term key that rabbit_delayed_message_leveled
+    %% uses for its bookie, so setup/0 can close it before opening its own.
+    persistent_term:put({rabbit_delayed_message_leveled, bookie}, Bookie),
+    %% Signal the gen_server to switch to the leveled backend once khepri_db is
+    %% fully enabled. The cast is non-blocking: the gen_server polls until the
+    %% feature flag is active, then calls setup() and resets the timer.
+    rabbit_delayed_message:await_khepri_and_setup(),
     {ok, #?MODULE{}}.
 
 -spec copy_to_khepri(Table, Record, State) -> Ret when
@@ -61,7 +66,7 @@ copy_to_khepri(Table,
     %% a retried migration does not produce duplicate entries.
     KeySuffix = crypto:hash(md5, term_to_binary({TS, Exchange, Ref})),
     Key = <<TS:64/big, KeySuffix/binary>>,
-    Bookie = get({?MODULE, bookie}),
+    Bookie = persistent_term:get({rabbit_delayed_message_leveled, bookie}),
     ok = leveled_bookie:book_put(Bookie, ?BUCKET, Key,
                                  term_to_binary({Exchange, Delivery}), []),
     {ok, State};
@@ -87,18 +92,6 @@ copy_to_khepri(Table, Record, _State) ->
 %% migration window closes.
 delete_from_khepri(_Table, _Key, State) ->
     {ok, State}.
-
-finish_copy_to_khepri(_State) ->
-    %% Close the migration bookie so all data is flushed to disk before the
-    %% gen_server opens its own bookie at the same path.
-    ?LOG_DEBUG(
-       "Mnesia->Leveled finish: closing migration bookie",
-       [],
-       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
-    case get({?MODULE, bookie}) of
-        undefined -> ok;
-        Bookie    -> ok = leveled_bookie:book_close(Bookie)
-    end.
 
 clear_data_in_khepri(Table) ->
     ?LOG_DEBUG(

@@ -15,7 +15,8 @@
 -export([start_link/0,
          disable_plugin/0,
          delay_message/3,
-         messages_delayed/1]).
+         messages_delayed/1,
+         await_khepri_and_setup/0]).
 
 %% Gen server exports
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
@@ -60,6 +61,9 @@ messages_delayed(Exchange) ->
 refresh_config() ->
     gen_server:call(?MODULE, refresh_config).
 
+await_khepri_and_setup() ->
+    gen_server:cast(?MODULE, await_khepri_and_setup).
+
 %%--------------------------------------------------------------------
 % Gen server exports
 init([]) ->
@@ -82,9 +86,13 @@ handle_call(refresh_config, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
+handle_cast(await_khepri_and_setup, State) ->
+    {noreply, maybe_switch_to_leveled(State)};
 handle_cast(_C, State) ->
     {noreply, State}.
 
+handle_info(check_khepri_active, State) ->
+    {noreply, maybe_switch_to_leveled(State)};
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
     case get_many(Key) of
         [] ->
@@ -283,3 +291,20 @@ bump_routed_stats(ExName, Qs, State) ->
 
 refresh_config(State) ->
     rabbit_event:init_stats_timer(State, #state.stats_state).
+
+%% Called after the mnesia-to-leveled migration has written data to disk.
+%% Waits until khepri_db is fully enabled, then switches the gen_server
+%% over to the leveled backend by running setup() and resetting the timer.
+maybe_switch_to_leveled(State = #state{timer = CurrTimer}) ->
+    case rabbit_feature_flags:is_enabled(khepri_db) of
+        true ->
+            case CurrTimer of
+                not_set -> ok;
+                _       -> erlang:cancel_timer(CurrTimer)
+            end,
+            setup(),
+            State#state{timer = maybe_delay_first()};
+        false ->
+            erlang:send_after(200, self(), check_khepri_active),
+            State
+    end.
