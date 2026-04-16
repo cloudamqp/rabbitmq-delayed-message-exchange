@@ -63,7 +63,8 @@ init_per_group(mnesia, Config) ->
         Config,
         [
             {metadata_store, mnesia},
-            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-mnesia")}
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-mnesia")},
+            {tcp_ports_base, 21000}
         ]
     ),
     run_broker_and_clients(Config1);
@@ -72,7 +73,18 @@ init_per_group(leveled, Config) ->
         Config,
         [
             {metadata_store, khepri},
-            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-leveled")}
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-leveled")},
+            {tcp_ports_base, 21100}
+        ]
+    ),
+    run_broker_and_clients(Config1);
+init_per_group(mnesia_to_khepri, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-m2k")},
+            {tcp_ports_base, 21200}
         ]
     ),
     run_broker_and_clients(Config1);
