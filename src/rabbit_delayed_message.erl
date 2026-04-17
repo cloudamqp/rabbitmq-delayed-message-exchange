@@ -91,8 +91,6 @@ handle_cast(await_khepri_and_setup, State) ->
 handle_cast(_C, State) ->
     {noreply, State}.
 
-handle_info(check_khepri_active, State) ->
-    {noreply, maybe_switch_to_leveled(State)};
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
     case get_many(Key) of
         [] ->
@@ -293,8 +291,8 @@ refresh_config(State) ->
     rabbit_event:init_stats_timer(State, #state.stats_state).
 
 %% Called after the mnesia-to-leveled migration has written data to disk.
-%% Waits until khepri_db is fully enabled, then switches the gen_server
-%% over to the leveled backend by running setup() and resetting the timer.
+%% is_enabled/1 uses blocking mode: it waits for the feature flag to stabilise
+%% before returning, so no polling loop is needed.
 maybe_switch_to_leveled(State = #state{timer = CurrTimer}) ->
     case rabbit_feature_flags:is_enabled(khepri_db) of
         true ->
@@ -305,6 +303,8 @@ maybe_switch_to_leveled(State = #state{timer = CurrTimer}) ->
             setup(),
             State#state{timer = maybe_delay_first()};
         false ->
-            erlang:send_after(200, self(), check_khepri_active),
+            rabbit_log:warning("Delayed message exchange: "
+                             "khepri_db feature flag is not enabled, "
+                             "delayed messages will continue to be stored in Mnesia"),
             State
     end.
