@@ -39,9 +39,10 @@ init_copy_to_khepri(_StoreId, _MigrationId, Tables) ->
     %% Store under the same persistent_term key that rabbit_delayed_message_leveled
     %% uses for its bookie, so setup/0 can close it before opening its own.
     persistent_term:put({rabbit_delayed_message_leveled, bookie}, Bookie),
-    %% Signal the gen_server to switch to the leveled backend once khepri_db is
-    %% fully enabled. The cast is non-blocking: the gen_server polls until the
-    %% feature flag is active, then calls setup() and resets the timer.
+    %% Signal the gen_server to switch to the leveled backend. The cast is
+    %% non-blocking; is_enabled/1 in the handler uses blocking mode and waits
+    %% until khepri_db is fully enabled (i.e. after all data has been copied)
+    %% before calling setup() and resetting the timer.
     rabbit_delayed_message:await_khepri_and_setup(),
     {ok, #?MODULE{}}.
 
