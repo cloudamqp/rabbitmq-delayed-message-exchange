@@ -54,7 +54,10 @@ disable_plugin() ->
     leveled_bookie:book_close(?BOOKIE).
 
 messages_delayed(Exchange) ->
-    get_counter(Exchange#exchange.name).
+    case get_counter(Exchange#exchange.name) of
+        not_found -> 0;
+        Count -> Count
+    end.
 
 store_delay(DelayTS, Exchange, Message) ->
     increase_counter(Exchange#exchange.name),
