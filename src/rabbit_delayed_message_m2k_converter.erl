@@ -69,8 +69,11 @@ copy_to_khepri(Table,
     KeySuffix = crypto:hash(md5, term_to_binary({TS, Exchange, Ref})),
     Key = <<TS:64/big, KeySuffix/binary>>,
     Bookie = persistent_term:get({rabbit_delayed_message_leveled, bookie}),
-    ok = leveled_bookie:book_put(Bookie, ?BUCKET, Key,
-                                 term_to_binary({Exchange, Delivery}), []),
+    case leveled_bookie:book_put(Bookie, ?BUCKET, Key,
+                                 term_to_binary({Exchange, Delivery}), []) of
+        ok    -> ok;
+        pause -> int_migration_pause()
+    end,
     {ok, State};
 copy_to_khepri(_Table, #delay_index{}, State) ->
     %% Index entries are rebuilt from the Leveled key-set on next startup.
@@ -101,3 +104,8 @@ clear_data_in_khepri(Table) ->
        [Table],
        #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
     ok.
+
+%% Named for debugging: trace this function to observe backpressure events
+%% during migration.
+int_migration_pause() ->
+    timer:sleep(1000).
