@@ -44,7 +44,8 @@ setup() ->
     %% one bookie at this path at a time. Errors are swallowed; the data is safe
     %% on disk via the leveled journal and will be recovered by book_start/1.
     catch leveled_bookie:book_close(?BOOKIE),
-    {ok, Bookie} = leveled_bookie:book_start([{root_path, Path}]),
+    {ok, Bookie} = leveled_bookie:book_start([{root_path, Path},
+                                              {compression_method, none}]),
     ?BOOKIE(Bookie),
     init_index(),
     init_counters().

@@ -35,7 +35,8 @@ init_copy_to_khepri(_StoreId, _MigrationId, Tables) ->
        #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
     Path = filename:join([rabbit_khepri:dir(), "rabbit_delayed_message", "leveled"]),
     ok = filelib:ensure_path(Path),
-    {ok, Bookie} = leveled_bookie:book_start([{root_path, Path}]),
+    {ok, Bookie} = leveled_bookie:book_start([{root_path, Path},
+                                              {compression_method, none}]),
     %% Store under the same persistent_term key that rabbit_delayed_message_leveled
     %% uses for its bookie, so setup/0 can close it before opening its own.
     persistent_term:put({rabbit_delayed_message_leveled, bookie}, Bookie),
