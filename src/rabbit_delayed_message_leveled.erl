@@ -124,10 +124,20 @@ delete(DelayTS) ->
             end
     end.
 
-delete_index(DeliveryTS) ->
+delete_index(DelayTS) ->
     case ets:whereis(?INDEX_TABLE) of
-        undefined -> ok;
-        _ -> ets:delete(?INDEX_TABLE, DeliveryTS)
+        undefined ->
+            ok;
+        _ ->
+            case ets:first(?INDEX_TABLE) of
+                '$end_of_table' ->
+                    ok;
+                {FirstDelay, _Key} = IndexEntry when FirstDelay =:= DelayTS ->
+                    ets:delete(?INDEX_TABLE, IndexEntry),
+                    delete_index(DelayTS);
+                _ ->
+                    ok
+            end
     end.
 
 make_key(DelayTS) ->
