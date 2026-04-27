@@ -15,8 +15,7 @@
 
 -export([init_copy_to_khepri/3,
          copy_to_khepri/3,
-         delete_from_khepri/3,
-         clear_data_in_khepri/1]).
+         delete_from_khepri/3]).
 
 -record(?MODULE, {}).
 
@@ -97,13 +96,6 @@ copy_to_khepri(Table, Record, _State) ->
 %% migration window closes.
 delete_from_khepri(_Table, _Key, State) ->
     {ok, State}.
-
-clear_data_in_khepri(Table) ->
-    ?LOG_DEBUG(
-       "Mnesia->Leveled clear_data_in_khepri: table ~0p",
-       [Table],
-       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
-    ok.
 
 %% Named for debugging: trace this function to observe backpressure events
 %% during migration.
