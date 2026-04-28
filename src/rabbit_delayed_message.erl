@@ -294,7 +294,7 @@ refresh_config(State) ->
 %% is_enabled/1 uses blocking mode: it waits for the feature flag to stabilise
 %% before returning, so no polling loop is needed.
 maybe_switch_to_leveled(State = #state{timer = CurrTimer}) ->
-    case rabbit_feature_flags:is_enabled(khepri_db) of
+    case rabbit_feature_flags:is_enabled(khepri_db, blocking) of
         true ->
             case CurrTimer of
                 not_set -> ok;
