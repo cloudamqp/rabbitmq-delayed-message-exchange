@@ -13,19 +13,21 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include("rabbit_delayed_message.hrl").
 
--export([init_copy_to_khepri/4,
+-export([init_copy_to_khepri/3,
          copy_to_khepri/3,
          delete_from_khepri/3]).
 
+-record(?MODULE, {}).
+
 -define(BUCKET, <<"x-delayed-messages">>).
 
--spec init_copy_to_khepri(StoreId, MigrationId, Tables, State) -> Ret when
+-spec init_copy_to_khepri(StoreId, MigrationId, Tables) -> Ret when
       StoreId :: khepri:store_id(),
       MigrationId :: mnesia_to_khepri:migration_id(),
       Tables :: [mnesia_to_khepri:mnesia_table()],
-      State :: rabbit_db_m2k_converter:state(),
-      Ret :: {ok, State}.
-init_copy_to_khepri(_StoreId, _MigrationId, Tables, State) ->
+      Ret :: {ok, Priv},
+      Priv :: #?MODULE{}.
+init_copy_to_khepri(_StoreId, _MigrationId, Tables) ->
     ?LOG_DEBUG(
        "Mnesia->Leveled init: tables ~0p",
        [Tables],
@@ -42,7 +44,7 @@ init_copy_to_khepri(_StoreId, _MigrationId, Tables, State) ->
     %% until khepri_db is fully enabled (i.e. after all data has been copied)
     %% before calling setup() and resetting the timer.
     rabbit_delayed_message:await_khepri_and_setup(),
-    {ok, State}.
+    {ok, #?MODULE{}}.
 
 -spec copy_to_khepri(Table, Record, State) -> Ret when
       Table :: mnesia_to_khepri:mnesia_table(),
