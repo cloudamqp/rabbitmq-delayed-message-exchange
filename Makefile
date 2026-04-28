@@ -48,9 +48,7 @@ include erlang.mk
 
 # After deps are fetched, strip lz4 and zstd from leveled's OTP application
 # dependency list so they are never started. See comment above DEPS for why.
-deps:: patch-leveled-app
-
-patch-leveled-app:
+autopatch-leveled::
 	$(verbose) if [ -f $(DEPS_DIR)/leveled/ebin/leveled.app ]; then \
 		erl -noshell -eval 'F = "$(DEPS_DIR)/leveled/ebin/leveled.app", {ok, [{application, Name, Props}]} = file:consult(F), Apps = proplists:get_value(applications, Props, []), Apps2 = Apps -- [lz4, zstd], case Apps2 =:= Apps of true -> ok; false -> Props2 = lists:keystore(applications, 1, Props, {applications, Apps2}), ok = file:write_file(F, io_lib:format("~tp.~n", [{application, Name, Props2}])) end' -s init stop; \
 	fi
