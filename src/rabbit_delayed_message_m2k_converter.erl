@@ -6,7 +6,7 @@
 %%
 -module(rabbit_delayed_message_m2k_converter).
 
--behaviour(rabbit_db_m2k_converter).
+-behaviour(mnesia_to_khepri_converter).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("khepri_mnesia_migration/src/kmm_logging.hrl").
