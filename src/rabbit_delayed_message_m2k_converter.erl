@@ -102,4 +102,6 @@ delete_from_khepri(_Table, _Key, State) ->
 %% Named for debugging: trace this function to observe backpressure events
 %% during migration.
 int_migration_pause() ->
+    rabbit_log:warning("Mnesia->Leveled migration pausing due to backpressure from Leveled Bookie",
+                       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
     timer:sleep(1000).
