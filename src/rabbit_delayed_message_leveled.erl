@@ -25,7 +25,8 @@
          get_first_delay/0,
          get_many/1,
          delete/1,
-         delete_index/1
+         delete_index/1,
+         list_all_keys/0
         ]).
 
 % --------------------------------------------
@@ -85,25 +86,29 @@ get_first_delay() ->
     end.
 
 get_many(DelayTS) ->
-    IndexEntries = get_many(DelayTS, []),
-    Results = [leveled_bookie:book_get(?BOOKIE, ?BUCKET, Key) || {_DeliveryTS, Key} <- IndexEntries],
-    [Entry || {ok, Value} <- Results,
-              Entry <- [binary_to_term(Value)]].
+    % We only return one entry per get_many call. This simplifies the
+    % implementation around index ETS and Leveled Bookie. We just let the
+    % gen_server trigger it's loop more times for leveled.
+    case get_first_with_key(DelayTS) of
+        undefined -> [];
+        {_DeliveryTS, Key} ->
+            Results = [leveled_bookie:book_get(?BOOKIE, ?BUCKET, Key)],
+            [Entry || {ok, Value} <- Results,
+                      Entry <- [binary_to_term(Value)]]
+    end.
 
-get_many(DelayTS, Acc) ->
+get_first_with_key(DelayTS) ->
     case ets:whereis(?INDEX_TABLE) of
         undefined ->
-            lists:reverse(Acc);
+            undefined;
         _ ->
             case ets:first(?INDEX_TABLE) of
                 '$end_of_table' ->
-                    lists:reverse(Acc);
+                    undefined;
                 {FirstDelay, _Key} = IndexEntry when FirstDelay =:= DelayTS ->
-                    % We need to delete as we go to avoid infinite loop
-                    ets:delete(?INDEX_TABLE, IndexEntry),
-                    get_many(DelayTS, [IndexEntry | Acc]);
+                    IndexEntry;
                 _ ->
-                    lists:reverse(Acc)
+                    undefined
             end
     end.
 
@@ -115,9 +120,7 @@ delete(DelayTS) ->
             case ets:first(?INDEX_TABLE) of
                 '$end_of_table' ->
                     ok;
-                {FirstDelay, Key} = IndexEntry when FirstDelay =:= DelayTS ->
-                    % We need to delete as we go to avoid infinite loop
-                    ets:delete(?INDEX_TABLE, IndexEntry),
+                {FirstDelay, Key} when FirstDelay =:= DelayTS ->
                     leveled_bookie:book_delete(?BOOKIE, ?BUCKET, Key, []);
                 _ ->
                     ok
@@ -133,8 +136,7 @@ delete_index(DelayTS) ->
                 '$end_of_table' ->
                     ok;
                 {FirstDelay, _Key} = IndexEntry when FirstDelay =:= DelayTS ->
-                    ets:delete(?INDEX_TABLE, IndexEntry),
-                    delete_index(DelayTS);
+                    ets:delete(?INDEX_TABLE, IndexEntry);
                 _ ->
                     ok
             end
@@ -189,6 +191,12 @@ init_index() ->
     end,
     {async, Runner} = leveled_bookie:book_keylist(
         ?BOOKIE, ?STD_TAG, ?BUCKET, {FoldFun, ok}),
+    Runner().
+
+list_all_keys() ->
+    FoldFun = fun(_B, Key, Acc) -> [Key | Acc] end,
+    {async, Runner} = leveled_bookie:book_keylist(
+        ?BOOKIE, ?STD_TAG, ?BUCKET, {FoldFun, []}),
     Runner().
 
 delayed_per_exchange() ->

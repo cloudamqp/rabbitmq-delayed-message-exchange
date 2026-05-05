@@ -433,6 +433,13 @@ mnesia_to_khepri_migration(Config) ->
     Sorted = lists:sort(Msgs),
     ?assertEqual(Sorted, Result),
 
+    ?assertEqual(undefined,
+                 rabbit_ct_broker_helpers:rpc(Config, 0,
+                     rabbit_delayed_message_leveled, get_first_delay, [])),
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0,
+                     rabbit_delayed_message_leveled, list_all_keys, [])),
+
     amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
     amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
     rabbit_ct_client_helpers:close_channel(Chan2),
