@@ -39,7 +39,9 @@
 -define(BUCKET, <<"x-delayed-messages">>).
 
 setup() ->
-    Path = filename:join([rabbit_khepri:dir(), "rabbit_delayed_message", "leveled"]),
+    Path = filename:join([rabbit_plugins:user_provided_plugins_data_dir(),
+                          "rabbit_delayed_message",
+                          "leveled"]),
     ok = filelib:ensure_path(Path),
     %% Close any bookie left open by the migration converter so there is at most
     %% one bookie at this path at a time. Errors are swallowed; the data is safe
@@ -53,7 +55,7 @@ setup() ->
 
 disable_plugin() ->
     catch ets:delete(?INDEX_TABLE),
-    leveled_bookie:book_close(?BOOKIE).
+    leveled_bookie:book_destroy(?BOOKIE).
 
 messages_delayed(Exchange) ->
     case get_counter(Exchange#exchange.name) of
@@ -62,12 +64,12 @@ messages_delayed(Exchange) ->
     end.
 
 store_delay(DelayTS, Exchange, Message) ->
-    increase_counter(Exchange#exchange.name),
     Key = make_key(DelayTS),
+    % Insert `{DelayTS, Key}' as ETS table key (wrapped in additional `{}')
+    ets:insert(?INDEX_TABLE, {{DelayTS, Key}}),
     leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
                                 term_to_binary({Exchange, Message}), []),
-    % Insert `{DelayTS, Key}' as ETS table key (wrapped in additional `{}')
-    ets:insert(?INDEX_TABLE, {{DelayTS, Key}}).
+    increase_counter(Exchange#exchange.name).
 
 get_first_delay() ->
     case ets:whereis(?INDEX_TABLE) of
