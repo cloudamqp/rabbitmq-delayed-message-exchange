@@ -58,6 +58,8 @@ copy_to_khepri(Table,
        #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
     %% Derive a deterministic Leveled key from the Mnesia record so that
     %% a retried migration does not produce duplicate entries.
+    ExNameBin = rabbit_delayed_message_leveled:exchange_name_to_bin(Exchange#exchange.name),
+    ExNameLen = byte_size(ExNameBin),
     KeySuffix = crypto:hash(md5, term_to_binary({TS, Exchange, Ref})),
     Key = <<TS:64/big, KeySuffix/binary>>,
     case rabbit_delayed_message_leveled:internal_put(Key, Exchange, Delivery) of

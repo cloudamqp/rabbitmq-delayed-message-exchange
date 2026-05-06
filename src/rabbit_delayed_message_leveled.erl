@@ -14,7 +14,7 @@
 -define(BOOKIE(Bookie), persistent_term:put({?MODULE, bookie}, Bookie)).
 -define(BOOKIE, persistent_term:get({?MODULE, bookie}, undefined)).
 
-%% ordered_set ETS table keyed by <<TS:64/big, Random:16/binary>>.
+%% ordered_set ETS table keyed by <<TS:64/big, ExNameLen:16/big, ExNameBin/binary, Random:16/binary>>.
 %% Big-endian byte order means ets:first/1 always returns the minimum-timestamp key.
 -define(INDEX_TABLE, rabbit_delayed_message_leveled_key_index).
 
@@ -26,7 +26,8 @@
          get_many/1,
          delete/1,
          delete_empty_key/1,
-         list_all_keys/0
+         list_all_keys/0,
+         exchange_name_to_bin/1
         ]).
 
 %% Internal exports for use by rabbit_delayed_message_m2k_converter
@@ -35,10 +36,9 @@
 % --------------------------------------------
 % Storage
 % --------------------------------------------
-%% All delayed messages share a single bucket. Keys are <<TS:64/big, Random:16/binary>>
-%% so they sort globally by delivery timestamp. The exchange name is stored inside
-%% the value, allowing a single range scan at timer expiry to collect all due messages
-%% regardless of which exchange they belong to.
+%% All delayed messages share a single bucket. Keys encode the delivery timestamp,
+%% exchange name, and a random suffix: <<TS:64/big, ExNameLen:16/big, ExNameBin/binary, Random:16/binary>>.
+%% Big-endian byte order ensures global ordering by delivery timestamp.
 -define(BUCKET, <<"x-delayed-messages">>).
 
 start_db() ->
@@ -128,10 +128,16 @@ delete({_DelayTS, LeveledKey} = IndexKey) ->
 delete_empty_key(IndexKey) ->
     ets:delete(?INDEX_TABLE, IndexKey).
 
-make_key(DelayTS) ->
-    <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.
+make_key(DelayTS, ExNameBin) ->
+    ExNameLen = byte_size(ExNameBin),
+    <<DelayTS:64/big, ExNameLen:16/big, ExNameBin/binary, (crypto:strong_rand_bytes(16))/binary>>.
 
-exchange_name_to_bin(ExName) -> term_to_binary(ExName).
+exchange_name_to_bin(#resource{virtual_host = VHost, name = Name}) ->
+    VHostLen = byte_size(VHost),
+    <<VHostLen:16/big, VHost/binary, Name/binary>>.
+
+exchange_bin_to_name(<<VHostLen:16/big, VHost:VHostLen/binary, Name/binary>>) ->
+    #resource{virtual_host = VHost, kind = exchange, name = Name}.
 
 % --------------------------------------------
 % Counters
@@ -161,11 +167,11 @@ increase_counter(ExNameBin) ->
 decrease_counter(ExNameBin) ->
     case persistent_term:get(counter_key(ExNameBin), undefined) of
         undefined ->
-            rabbit_log:warning("delayed message counter not found for exchange ~tp while trying to decrease", [binary_to_term(ExNameBin)]);
+            rabbit_log:warning("delayed message counter not found for exchange ~tp while trying to decrease", [exchange_bin_to_name(ExNameBin)]);
         Counter ->
             case atomics:get(Counter, 1) of
                 0 ->
-                    rabbit_log:warning("delayed message counter already zero for exchange ~tp and we tried to decrease", [binary_to_term(ExNameBin)]);
+                    rabbit_log:warning("delayed message counter already zero for exchange ~tp and we tried to decrease", [exchange_bin_to_name(ExNameBin)]);
                 _ ->
                     atomics:sub(Counter, 1, 1)
             end
@@ -176,19 +182,21 @@ decrease_counter(ExNameBin) ->
 % --------------------------------------------
 
 %% Creates the index table and initialises per-exchange counters in a single
-%% Leveled fold (relevant on restart with existing data).
+%% Leveled metadata fold (efficient at startup: metadata is densely packed in the ledger).
 init_index_and_counters() ->
     ets:new(?INDEX_TABLE, [named_table, ordered_set, public]),
-    FoldFun = fun(_B, {ExNameBin, <<DelayTS:64/big, _:128>> = Key}, Acc) ->
+    FoldFun = fun(_B, <<DelayTS:64/big, ExNameLen:16/big, ExNameBin:ExNameLen/binary, _/binary>> = Key, _Value, Acc) ->
         ets:insert(?INDEX_TABLE, {{DelayTS, Key}, ExNameBin}),
         maps:update_with(ExNameBin, fun(C) -> C + 1 end, 1, Acc)
     end,
-    {async, Runner} = leveled_bookie:book_indexfold(
+    {async, Runner} = leveled_bookie:book_headfold(
         ?BOOKIE,
-        {?BUCKET, null},
+        ?STD_TAG,
+        {bucket_list, [?BUCKET]},
         {FoldFun, #{}},
-        {?EXCHANGE_INDEX, <<>>, binary:copy(<<255>>, 1024)},
-        {true, undefined}),
+        false,
+        false,
+        false),
     DelayedPerExchange = Runner(),
     maps:foreach(fun(ExNameBin, Count) ->
                       Atomic = atomics:new(1, [{signed, true}]),
