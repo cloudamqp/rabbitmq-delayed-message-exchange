@@ -234,8 +234,7 @@ bench_full_cycle(Config) ->
                 Backend:store_delay(Now + I, Exchange, Msg),
                 {_TS, Key} = Backend:get_first_delay(),
                 Backend:get_many(Key),
-                Backend:delete(Key),
-                Backend:delete_index(Key)
+                Backend:delete(Key)
             end, lists:seq(1, N))
         end),
         report_timings(store_delay,     Backend, N, Config),
@@ -302,7 +301,6 @@ drain_store(Backend) ->
             ok;
         {_TS, Key} ->
             Backend:delete(Key),
-            Backend:delete_index(Key),
             drain_store(Backend)
     end.
 
