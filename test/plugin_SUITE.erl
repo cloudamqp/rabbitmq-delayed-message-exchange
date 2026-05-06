@@ -37,6 +37,7 @@ groups() ->
                                 e2e_delay,
                                 delay_order,
                                 delayed_messages_count,
+                                counter_survives_restart,
                                 node_restart_before_delay_expires,
                                 node_restart_after_delay_expires,
                                 string_delay_header
@@ -325,8 +326,48 @@ delayed_messages_count(Config) ->
 
     consume(Chan, Q, Msgs),
 
+    Exchanges3 = rabbit_ct_broker_helpers:rpc(Config, 0,
+          rabbit_exchange, info_all, [<<"/">>]),
+    [Exchange3] = lists:filter(FilterEx, Exchanges3),
+    {messages_delayed, 0} = proplists:lookup(messages_delayed, Exchange3),
+
     rabbit_ct_broker_helpers:clear_policy(Config, 0, PolicyName),
     rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+counter_survives_restart(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    MsgCount = 5,
+    Msgs = lists:duplicate(MsgCount, 10000),
+
+    %% Publisher confirms ensure every message is persisted before the restart.
+    amqp_channel:call(Chan, #'confirm.select'{}),
+    publish_messages(Chan, Ex, Msgs),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+
+    rabbit_ct_broker_helpers:restart_node(Config, 0),
+
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+
+    FilterEx = fun(X) ->
+        {resource, <<"/">>, exchange, Ex} == proplists:get_value(name, X)
+    end,
+    Exchanges = rabbit_ct_broker_helpers:rpc(Config, 0,
+                    rabbit_exchange, info_all, [<<"/">>]),
+    [Exchange] = lists:filter(FilterEx, Exchanges),
+    {messages_delayed, MsgCount} = proplists:lookup(messages_delayed, Exchange),
+
+    {ok, _} = consume(Chan2, Q, Msgs),
+    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
     ok.
 
 node_restart_before_delay_expires(Config) ->

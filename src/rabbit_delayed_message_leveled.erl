@@ -105,6 +105,13 @@ delete({_DelayTS, LeveledKey} = IndexKey) ->
         undefined ->
             ok;
         _ ->
+            case leveled_bookie:book_get(?BOOKIE, ?BUCKET, LeveledKey) of
+                {ok, Value} ->
+                    {Exchange, _} = binary_to_term(Value),
+                    decrease_counter(Exchange#exchange.name);
+                _ ->
+                    ok
+            end,
             leveled_bookie:book_delete(?BOOKIE, ?BUCKET, LeveledKey, []),
             ets:delete(?INDEX_TABLE, IndexKey)
     end.
@@ -145,6 +152,15 @@ increase_counter(ExName) ->
             persistent_term:put(counter_key(ExName), Counter1);
         _ ->
             atomics:add(Counter, 1, 1)
+    end.
+
+decrease_counter(ExName) ->
+    Counter = persistent_term:get(counter_key(ExName), undefined),
+    case Counter of
+        undefined ->
+            rabbit_log:warning("delayed message counter not found for exchange ~tp while trying to decrease", [ExName]);
+        _ ->
+            atomics:sub(Counter, 1, 1)
     end.
 
 % --------------------------------------------
