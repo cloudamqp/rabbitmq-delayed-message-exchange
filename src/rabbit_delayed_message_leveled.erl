@@ -67,8 +67,11 @@ store_delay(DelayTS, Exchange, Message) ->
     Key = make_key(DelayTS),
     % Insert `{DelayTS, Key}' as ETS table key (wrapped in additional `{}')
     ets:insert(?INDEX_TABLE, {{DelayTS, Key}}),
-    leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
-                                term_to_binary({Exchange, Message}), []),
+    case leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
+                                     term_to_binary({Exchange, Message}), []) of
+        ok    -> ok;
+        pause -> int_store_pause()
+    end,
     increase_counter(Exchange#exchange.name).
 
 get_first_delay() ->
@@ -184,6 +187,12 @@ list_all_keys() ->
     {async, Runner} = leveled_bookie:book_keylist(
         ?BOOKIE, ?STD_TAG, ?BUCKET, {FoldFun, []}),
     Runner().
+
+%% Named for debugging: trace this function to observe backpressure events
+%% during normal operation.
+int_store_pause() ->
+    rabbit_log:warning("Delayed message store pausing due to backpressure from Leveled Bookie"),
+    timer:sleep(1000).
 
 delayed_per_exchange() ->
     FoldFun = fun(_B, _K, Term, Acc) ->
