@@ -64,7 +64,7 @@ disable_plugin() ->
     leveled_bookie:book_destroy(?BOOKIE).
 
 messages_delayed(Exchange) ->
-    case get_counter(Exchange#exchange.name) of
+    case get_counter(exchange_name_to_bin(Exchange#exchange.name)) of
         not_found -> 0;
         Count -> Count
     end.
@@ -77,7 +77,7 @@ store_delay(DelayTS, Exchange, Message) ->
         ok    -> ok;
         pause -> int_store_pause()
     end,
-    increase_counter(Exchange#exchange.name).
+    increase_counter(ExNameBin).
 
 internal_put(Key, Exchange, Message) ->
     leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
@@ -112,15 +112,17 @@ get_many(_) ->
     %% by handle_info via maybe_delay_first/0 after this returns.
     [].
 
-delete({_DelayTS, LeveledKey} = IndexKey) ->
+delete({DelayTS, LeveledKey} = IndexKey) ->
     case ets:whereis(?INDEX_TABLE) of
         undefined ->
             ok;
         _ ->
-            case leveled_bookie:book_get(?BOOKIE, ?BUCKET, LeveledKey) of
-                {ok, Value} ->
-                    {Exchange, _} = binary_to_term(Value),
-                    decrease_counter(Exchange#exchange.name);
+            case ets:first(?INDEX_TABLE) of
+                '$end_of_table' ->
+                    ok;
+                {FirstDelay, Key} when FirstDelay =:= DelayTS ->
+                    [{_, ExNameBin}] = ets:lookup(?INDEX_TABLE, {FirstDelay, Key}),
+                    decrease_counter(ExNameBin);
                 _ ->
                     ok
             end,
@@ -134,62 +136,71 @@ delete_empty_key(IndexKey) ->
 make_key(DelayTS) ->
     <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.
 
+exchange_name_to_bin(ExName) -> term_to_binary(ExName).
+
 % --------------------------------------------
 % Counters
 % --------------------------------------------
-init_counters() ->
-    DelayedPerExchange = delayed_per_exchange(),
-    maps:foreach(fun(ExName, Count) ->
-                      Atomic = atomics:new(1, [{signed, false}]),
-                      atomics:put(Atomic, 1, Count),
-                      persistent_term:put(counter_key(ExName), Atomic)
-              end, DelayedPerExchange).
 
-counter_key(ExName) ->
-    {?MODULE, counter, ExName}.
+counter_key(ExNameBin) ->
+    {?MODULE, counter, ExNameBin}.
 
-get_counter(ExName) ->
-    case persistent_term:get(counter_key(ExName), undefined) of
+get_counter(ExNameBin) ->
+    case persistent_term:get(counter_key(ExNameBin), undefined) of
         undefined -> not_found;
         Atomic ->
             atomics:get(Atomic, 1)
     end.
 
-increase_counter(ExName) ->
-    Counter = persistent_term:get(counter_key(ExName), undefined),
+increase_counter(ExNameBin) ->
+    Counter = persistent_term:get(counter_key(ExNameBin), undefined),
     case Counter of
         undefined ->
-            Counter1 = atomics:new(1, [{signed, false}]),
+            Counter1 = atomics:new(1, [{signed, true}]),
             atomics:put(Counter1, 1, 1),
-            persistent_term:put(counter_key(ExName), Counter1);
+            persistent_term:put(counter_key(ExNameBin), Counter1);
         _ ->
             atomics:add(Counter, 1, 1)
     end.
 
-decrease_counter(ExName) ->
-    Counter = persistent_term:get(counter_key(ExName), undefined),
+decrease_counter(ExNameBin) ->
+    Counter = persistent_term:get(counter_key(ExNameBin), undefined),
     case Counter of
         undefined ->
-            rabbit_log:warning("delayed message counter not found for exchange ~tp while trying to decrease", [ExName]);
-        _ ->
-            atomics:sub(Counter, 1, 1)
+            rabbit_log:warning("delayed message counter not found for exchange ~tp while trying to decrease", [binary_to_term(ExNameBin)]);
+        Counter ->
+            case atomics:get(Counter, 1) of
+                0 ->
+                    rabbit_log:warning("delayed message counter already zero for exchange ~tp and we tried to decrease", [binary_to_term(ExNameBin)]);
+                _ ->
+                    atomics:sub(Counter, 1, 1)
+            end
     end.
 
 % --------------------------------------------
 % Internal functions
 % --------------------------------------------
 
-%% Creates the index table and populates it from any keys already present
-%% in leveled (relevant on restart with existing data).
-init_index() ->
+%% Creates the index table and initialises per-exchange counters in a single
+%% Leveled fold (relevant on restart with existing data).
+init_index_and_counters() ->
     ets:new(?INDEX_TABLE, [named_table, ordered_set, public]),
-    FoldFun = fun(_B, <<DelayTS:64/big, _:128>> = Key, _Acc) ->
-        ets:insert(?INDEX_TABLE, {{DelayTS, Key}}),
-        ok
+    FoldFun = fun(_B, {ExNameBin, <<DelayTS:64/big, _:128>> = Key}, Acc) ->
+        ets:insert(?INDEX_TABLE, {{DelayTS, Key}, ExNameBin}),
+        maps:update_with(ExNameBin, fun(C) -> C + 1 end, 1, Acc)
     end,
-    {async, Runner} = leveled_bookie:book_keylist(
-        ?BOOKIE, ?STD_TAG, ?BUCKET, {FoldFun, ok}),
-    Runner().
+    {async, Runner} = leveled_bookie:book_indexfold(
+        ?BOOKIE,
+        {?BUCKET, null},
+        {FoldFun, #{}},
+        {?EXCHANGE_INDEX, <<>>, binary:copy(<<255>>, 1024)},
+        {true, undefined}),
+    DelayedPerExchange = Runner(),
+    maps:foreach(fun(ExNameBin, Count) ->
+                      Atomic = atomics:new(1, [{signed, true}]),
+                      atomics:put(Atomic, 1, Count),
+                      persistent_term:put(counter_key(ExNameBin), Atomic)
+              end, DelayedPerExchange).
 
 list_all_keys() ->
     FoldFun = fun(_B, Key, Acc) -> [Key | Acc] end,
