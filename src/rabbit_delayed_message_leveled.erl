@@ -112,19 +112,14 @@ get_many(_) ->
     %% by handle_info via maybe_delay_first/0 after this returns.
     [].
 
-delete({DelayTS, LeveledKey} = IndexKey) ->
+delete({_DelayTS, LeveledKey} = IndexKey) ->
     case ets:whereis(?INDEX_TABLE) of
         undefined ->
             ok;
         _ ->
-            case ets:first(?INDEX_TABLE) of
-                '$end_of_table' ->
-                    ok;
-                {FirstDelay, Key} when FirstDelay =:= DelayTS ->
-                    [{_, ExNameBin}] = ets:lookup(?INDEX_TABLE, {FirstDelay, Key}),
-                    decrease_counter(ExNameBin);
-                _ ->
-                    ok
+            case ets:lookup(?INDEX_TABLE, IndexKey) of
+                [{_, ExNameBin}] -> decrease_counter(ExNameBin);
+                []               -> ok
             end,
             leveled_bookie:book_delete(?BOOKIE, ?BUCKET, LeveledKey, []),
             ets:delete(?INDEX_TABLE, IndexKey)
@@ -164,8 +159,7 @@ increase_counter(ExNameBin) ->
     end.
 
 decrease_counter(ExNameBin) ->
-    Counter = persistent_term:get(counter_key(ExNameBin), undefined),
-    case Counter of
+    case persistent_term:get(counter_key(ExNameBin), undefined) of
         undefined ->
             rabbit_log:warning("delayed message counter not found for exchange ~tp while trying to decrease", [binary_to_term(ExNameBin)]);
         Counter ->
