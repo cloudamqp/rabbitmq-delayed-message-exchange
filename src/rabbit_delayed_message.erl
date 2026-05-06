@@ -94,11 +94,10 @@ handle_cast(_C, State) ->
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
     case get_many(Key) of
         [] ->
-            delete_index(Key);
+            delete_empty_key(Key);
         Deliveries ->
             _ = route(Deliveries, State),
-            delete(Key),
-            delete_index(Key)
+            delete(Key)
     end,
     {noreply, State#state{timer = maybe_delay_first()}};
 handle_info(_I, State) ->
@@ -122,16 +121,16 @@ delete(Key) ->
               khepri => fun() -> rabbit_delayed_message_leveled:delete(Key) end}
         ).
 
-delete_index(Key) ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:delete_index(Key) end,
-              khepri => fun() -> rabbit_delayed_message_leveled:delete_index(Key) end}
-        ).
-
 get_first_delay() ->
     rabbit_khepri:handle_fallback(
             #{mnesia => fun() -> rabbit_delayed_message_mnesia:get_first_delay() end,
               khepri => fun() -> rabbit_delayed_message_leveled:get_first_delay() end}
+        ).
+
+delete_empty_key(Key) ->
+    rabbit_khepri:handle_fallback(
+            #{mnesia => fun() -> rabbit_delayed_message_mnesia:delete_empty_key(Key) end,
+              khepri => fun() -> rabbit_delayed_message_leveled:delete_empty_key(Key) end}
         ).
 
 maybe_delay_first() ->
@@ -179,11 +178,9 @@ internal_delay_message(CurrTimer, Exchange, Message, Delay) ->
                     %% Timer is already expired.  Handler will be invoked soon.
                     {ok, CurrTimer};
                 CurrMS when Delay < CurrMS ->
-                    %% Current timer lasts longer that new message delay
+                    %% Current timer lasts longer than new message delay.
                     _ = erlang:cancel_timer(CurrTimer),
-                    % TODO: Can we save some time getting the key from before?
-                    {DelayTS, _Key} = get_first_delay(),
-                    {ok, start_timer(Delay, DelayTS)};
+                    {ok, maybe_delay_first()};
                 _ ->
                     %% Timer is set to expire sooner than this
                     %% message's scheduled delivery time.

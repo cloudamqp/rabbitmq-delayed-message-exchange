@@ -25,7 +25,7 @@
          get_first_delay/0,
          get_many/1,
          delete/1,
-         delete_index/1,
+         delete_empty_key/1,
          list_all_keys/0
         ]).
 
@@ -79,70 +79,38 @@ get_first_delay() ->
             case ets:first(?INDEX_TABLE) of
                 '$end_of_table' ->
                     undefined;
-                {DelayTS, _Key} ->
-                    % Return DelayTS both as DelayTS and as key
-                    % Mnesia uses the _Key, but on leveled implementation we use the
-                    % DelayTS to lookup the entries to deliver
-                    {DelayTS, DelayTS}
+                {DelayTS, _LeveledKey} = IndexKey ->
+                    {DelayTS, IndexKey}
             end
     end.
 
-get_many(DelayTS) ->
+get_many({_TS, LeveledKey} = _IndexKey) ->
     % We only return one entry per get_many call. This simplifies the
     % implementation around index ETS and Leveled Bookie. We just let the
     % gen_server trigger it's loop more times for leveled.
-    case get_first_with_key(DelayTS) of
-        undefined -> [];
-        {_DeliveryTS, Key} ->
-            Results = [leveled_bookie:book_get(?BOOKIE, ?BUCKET, Key)],
-            [Entry || {ok, Value} <- Results,
-                      Entry <- [binary_to_term(Value)]]
-    end.
-
-get_first_with_key(DelayTS) ->
-    case ets:whereis(?INDEX_TABLE) of
-        undefined ->
-            undefined;
+    case leveled_bookie:book_get(?BOOKIE, ?BUCKET, LeveledKey) of
+        {ok, Value} ->
+            [binary_to_term(Value)];
         _ ->
-            case ets:first(?INDEX_TABLE) of
-                '$end_of_table' ->
-                    undefined;
-                {FirstDelay, _Key} = IndexEntry when FirstDelay =:= DelayTS ->
-                    IndexEntry;
-                _ ->
-                    undefined
-            end
-    end.
+            []
+    end;
+get_many(_) ->
+    %% Stale Mnesia-format key from a timer set before the migration to Leveled.
+    %% The data is in Leveled under a different key; a new timer will be started
+    %% by handle_info via maybe_delay_first/0 after this returns.
+    [].
 
-delete(DelayTS) ->
+delete({_DelayTS, LeveledKey} = IndexKey) ->
     case ets:whereis(?INDEX_TABLE) of
         undefined ->
             ok;
         _ ->
-            case ets:first(?INDEX_TABLE) of
-                '$end_of_table' ->
-                    ok;
-                {FirstDelay, Key} when FirstDelay =:= DelayTS ->
-                    leveled_bookie:book_delete(?BOOKIE, ?BUCKET, Key, []);
-                _ ->
-                    ok
-            end
+            leveled_bookie:book_delete(?BOOKIE, ?BUCKET, LeveledKey, []),
+            ets:delete(?INDEX_TABLE, IndexKey)
     end.
 
-delete_index(DelayTS) ->
-    case ets:whereis(?INDEX_TABLE) of
-        undefined ->
-            ok;
-        _ ->
-            case ets:first(?INDEX_TABLE) of
-                '$end_of_table' ->
-                    ok;
-                {FirstDelay, _Key} = IndexEntry when FirstDelay =:= DelayTS ->
-                    ets:delete(?INDEX_TABLE, IndexEntry);
-                _ ->
-                    ok
-            end
-    end.
+delete_empty_key(IndexKey) ->
+    ets:delete(?INDEX_TABLE, IndexKey).
 
 make_key(DelayTS) ->
     <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.

@@ -14,7 +14,7 @@
          get_first_delay/0,
          get_many/1,
          delete/1,
-         delete_index/1
+         delete_empty_key/1
         ]).
 
 %% For testing, debugging and manual use
@@ -76,7 +76,7 @@ get_many(Key) ->
 delete(Key) ->
     mnesia:dirty_delete(?TABLE_NAME, Key).
 
-delete_index(Key) ->
+delete_empty_key(Key) ->
     mnesia:dirty_delete(?INDEX_TABLE_NAME, Key).
 
 
