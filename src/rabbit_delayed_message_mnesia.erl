@@ -74,7 +74,8 @@ get_many(Key) ->
                            delivery = Msg0} <- DelayEntries].
 
 delete(Key) ->
-    mnesia:dirty_delete(?TABLE_NAME, Key).
+    mnesia:dirty_delete(?TABLE_NAME, Key),
+    mnesia:dirty_delete(?INDEX_TABLE_NAME, Key).
 
 delete_empty_key(Key) ->
     mnesia:dirty_delete(?INDEX_TABLE_NAME, Key).
