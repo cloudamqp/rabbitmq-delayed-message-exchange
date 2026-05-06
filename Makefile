@@ -15,11 +15,10 @@ dep_rabbit                     = git_rmq-subfolder rabbitmq-server $(RABBITMQ_VE
 dep_rabbitmq_ct_client_helpers = git_rmq-subfolder rabbitmq-ct-client-helpers $(RABBITMQ_VERSION)
 dep_rabbitmq_ct_helpers        = git_rmq-subfolder rabbitmq-ct-helpers $(RABBITMQ_VERSION)
 dep_leveled                = git https://github.com/martinsumner/leveled.git develop-3.4
-# lz4 and zstd are omitted from DEPS intentionally: OTP 28 ships its own stdlib
-# zstd module which clashes with the OpenRiak NIF, and RabbitMQ 4.2.0 ships an
-# incompatible lz4. leveled is configured to use no compression, so neither NIF
-# is needed at runtime. They are still fetched transitively by leveled for
-# compilation but must not be started as OTP applications.
+# lz4 and zstd are omitted from DEPS intentionally: we don't want NIFs in the
+# plugin. leveled is configured to use no compression, so neither NIF is needed
+# at runtime. They are still fetched transitively by leveled for compilation
+# but must not be started as OTP applications.
 DEPS = rabbit_common rabbit leveled
 export IGNORE_DEPS += eqwalizer_support
 TEST_DEPS = ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck eflame
