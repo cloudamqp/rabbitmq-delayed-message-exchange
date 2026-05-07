@@ -17,7 +17,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+        - erlang_version: "26"
+          elixir_version: "1.17.x"
+          rabbitmq_version: "v4.2.6"
         - erlang_version: "27"
+          elixir_version: "1.17.x"
+          rabbitmq_version: "v4.2.6"
+        - erlang_version: "28"
           elixir_version: "1.17.x"
           rabbitmq_version: "v4.2.6"
 
