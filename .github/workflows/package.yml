@@ -57,9 +57,8 @@ jobs:
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
-        working-directory: ${{ env.PLUGIN_FOLDER }}/plugins
         with:
           name: artifact_erlang_${{ matrix.erlang_version }}
           path: |
-            rabbitmq_delayed_message_exchange*.ez
-            leveled*.ez
+            ${{ env.PLUGIN_FOLDER }}/plugins/rabbitmq_delayed_message_exchange*.ez
+            ${{ env.PLUGIN_FOLDER }}/plugins/leveled*.ez
