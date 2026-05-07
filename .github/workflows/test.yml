@@ -12,7 +12,6 @@ jobs:
   test:
     name: Checks on OTP ${{ matrix.erlang_version }}
 
-    # setup-beam only supports OTP 24.2+ on ubuntu-22.04
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
