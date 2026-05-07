@@ -3,6 +3,10 @@ on:
   push:
   workflow_dispatch:
 
+env:
+  SERVER_FOLDER: rabbitmq-server
+  PLUGIN_FOLDER: rabbitmq-server/deps/rabbitmq-delayed-message-exchange
+
 jobs:
   build:
     name: Build package for Erlang ${{ matrix.erlang_version }}
@@ -20,18 +24,18 @@ jobs:
         uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ matrix.erlang_version }}
-          rebar3-version: ${{matrix.rebar3}}
-          elixir-version: ${{matrix.elixir-version}}
+          rebar3-version: ${{ matrix.rebar3 }}
+          elixir-version: ${{ matrix.elixir-version }}
 
       - name: Checkout rabbitmq-server
         uses: actions/checkout@v4
         with:
           repository: rabbitmq/rabbitmq-server
-          path: rabbitmq-server
+          path: ${{ env.SERVER_FOLDER }}
           ref: v4.2.6
 
       - name: Fetch and build RabbitMQ dependencies
-        working-directory: rabbitmq-server
+        working-directory: ${{ env.SERVER_FOLDER }}
         run: |
           make fetch-deps
           make -C deps/rabbitmq_ct_helpers
@@ -39,19 +43,19 @@ jobs:
       - name: Checkout this repo inside rabbitmq-server
         uses: actions/checkout@v4
         with:
-          path: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
+          path: ${{ env.PLUGIN_FOLDER }}
 
       - name: Build ez file
-        working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
+        working-directory: ${{ env.PLUGIN_FOLDER }}
         run: make dist DIST_AS_EZS=true
 
       - name: Generate tarball
-        working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
+        working-directory: ${{ env.PLUGIN_FOLDER }}
         run: cd plugins && tar -czvf plugins.tar.gz rabbitmq_delayed_message_exchange*.ez leveled*.ez
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
-        working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/plugins
+        working-directory: ${{ env.PLUGIN_FOLDER }}/plugins
         with:
           name: artifact_erlang_${{ matrix.erlang_version }}
           path: |

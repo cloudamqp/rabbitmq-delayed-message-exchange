@@ -28,19 +28,23 @@ jobs:
           repository: rabbitmq/rabbitmq-server
           ref: ${{ matrix.rabbitmq_version }}
           path: ${{ env.SERVER_FOLDER }}
+
       - name: Checkout Plugin
         uses: actions/checkout@v6
         with:
           path: ${{ env.PLUGIN_FOLDER }}
+
       - name: Install Erlang and Elixir
         uses: erlef/setup-beam@v1
         with:
           otp-version: ${{matrix.erlang_version}}
           elixir-version: ${{matrix.elixir_version}}
+
       - name: Run tests
         working-directory: ${{ env.PLUGIN_FOLDER }}
         run: |
           make ct RABBITMQ_VERSION=${{matrix.rabbitmq_version}}
+
       - name: Upload test results
         uses: actions/upload-artifact@v6
         if: always()
