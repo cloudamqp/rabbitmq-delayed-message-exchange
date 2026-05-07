@@ -66,7 +66,7 @@ init_per_group(mnesia, Config) ->
         Config,
         [
             {metadata_store, mnesia},
-            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-mnesia")},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-mnesia")},
             {tcp_ports_base, 21000}
         ]
     ),
@@ -76,7 +76,7 @@ init_per_group(leveled, Config) ->
         Config,
         [
             {metadata_store, khepri},
-            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-leveled")},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-leveled")},
             {tcp_ports_base, 21100}
         ]
     ),
@@ -86,7 +86,7 @@ init_per_group(mnesia_to_khepri, Config) ->
         Config,
         [
             {metadata_store, mnesia},
-            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-m2k")},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k")},
             {tcp_ports_base, 21200}
         ]
     ),
@@ -96,7 +96,7 @@ init_per_group(mnesia_to_khepri_slow, Config) ->
         Config,
         [
             {metadata_store, mnesia},
-            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-m2k-slow")},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k-slow")},
             {tcp_ports_base, 21300}
         ]
     ),

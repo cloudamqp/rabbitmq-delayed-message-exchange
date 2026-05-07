@@ -10,7 +10,7 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
 
--export([get_delay/1, swap_delay_header/1, append_to_atom/2]).
+-export([get_delay/1, swap_delay_header/1]).
 
 -define(INTEGER_ARG_TYPES, [long, ubyte, short, ushort, int, uint]).
 
@@ -63,8 +63,3 @@ check_int_arg(Type) ->
         true  -> ok;
         false -> {error, {unacceptable_type, Type}}
     end.
-
-append_to_atom(Atom, Append) when is_atom(Append) ->
-    append_to_atom(Atom, atom_to_list(Append));
-append_to_atom(Atom, Append) when is_list(Append) ->
-    list_to_atom(atom_to_list(Atom) ++ Append).

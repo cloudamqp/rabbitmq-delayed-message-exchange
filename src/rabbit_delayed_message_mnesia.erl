@@ -14,7 +14,8 @@
          get_first_delay/0,
          get_many/1,
          delete/1,
-         delete_empty_key/1
+         delete_empty_key/1,
+         append_to_atom/2
         ]).
 
 %% For testing, debugging and manual use
@@ -106,3 +107,8 @@ index_table_name() ->
 %% not assume any RabbitMQ subsystem is running.
 table_names() ->
     [?TABLE_NAME, ?INDEX_TABLE_NAME].
+
+append_to_atom(Atom, Append) when is_atom(Append) ->
+    append_to_atom(Atom, atom_to_list(Append));
+append_to_atom(Atom, Append) when is_list(Append) ->
+    list_to_atom(atom_to_list(Atom) ++ Append).
