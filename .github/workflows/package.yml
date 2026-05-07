@@ -1,0 +1,61 @@
+name: Package
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build package for Erlang ${{ matrix.erlang_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+
+          - erlang_version: 28
+            rebar3: '3.25.0'
+            elixir-version: 1.18
+
+    # setup-beam only supports OTP 24.2+ on ubuntu-22.04
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.erlang_version }}
+          rebar3-version: ${{matrix.rebar3}}
+          elixir-version: ${{matrix.elixir-version}}
+
+      - name: Checkout rabbitmq-server
+        uses: actions/checkout@v4
+        with:
+          repository: rabbitmq/rabbitmq-server
+          path: rabbitmq-server
+          ref: v4.2.6
+
+      - name: Fetch and build RabbitMQ dependencies
+        working-directory: rabbitmq-server
+        run: |
+          make fetch-deps
+          make -C deps/rabbitmq_ct_helpers
+
+      - name: Checkout this repo inside rabbitmq-server
+        uses: actions/checkout@v4
+        with:
+          path: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
+
+      - name: Build ez file
+        working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
+        run: make dist DIST_AS_EZS=true
+
+      - name: Generate tarball
+        working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange
+        run: cd plugins && tar -czvf plugins.tar.gz rabbitmq_delayed_message_exchange*.ez leveled*.ez
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        working-directory: rabbitmq-server/deps/rabbitmq_delayed_message_exchange/plugins
+        with:
+          name: artifact_erlang_${{ matrix.erlang_version }}
+          path: |
+            rabbitmq_delayed_message_exchange*.ez
+            leveled*.ez
