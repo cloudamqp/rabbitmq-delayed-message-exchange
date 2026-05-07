@@ -29,6 +29,9 @@
          list_all_keys/0
         ]).
 
+%% Internal exports for use by rabbit_delayed_message_m2k_converter
+-export([start_db/0, internal_put/3]).
+
 % --------------------------------------------
 % Storage
 % --------------------------------------------
@@ -38,18 +41,21 @@
 %% regardless of which exchange they belong to.
 -define(BUCKET, <<"x-delayed-messages">>).
 
-setup() ->
+start_db() ->
     Path = filename:join([rabbit_plugins:user_provided_plugins_data_dir(),
                           "rabbit_delayed_message",
                           "leveled"]),
     ok = filelib:ensure_path(Path),
+    {ok, Bookie} = leveled_bookie:book_start([{root_path, Path},
+                                              {compression_method, none}]),
+    ?BOOKIE(Bookie).
+
+setup() ->
     %% Close any bookie left open by the migration converter so there is at most
     %% one bookie at this path at a time. Errors are swallowed; the data is safe
     %% on disk via the leveled journal and will be recovered by book_start/1.
     catch leveled_bookie:book_close(?BOOKIE),
-    {ok, Bookie} = leveled_bookie:book_start([{root_path, Path},
-                                              {compression_method, none}]),
-    ?BOOKIE(Bookie),
+    start_db(),
     init_index(),
     init_counters().
 
@@ -67,12 +73,15 @@ store_delay(DelayTS, Exchange, Message) ->
     Key = make_key(DelayTS),
     % Insert `{DelayTS, Key}' as ETS table key (wrapped in additional `{}')
     ets:insert(?INDEX_TABLE, {{DelayTS, Key}}),
-    case leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
-                                     term_to_binary({Exchange, Message}), []) of
+    case internal_put(Key, Exchange, Message) of
         ok    -> ok;
         pause -> int_store_pause()
     end,
     increase_counter(Exchange#exchange.name).
+
+internal_put(Key, Exchange, Message) ->
+    leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
+                            term_to_binary({Exchange, Message}), []).
 
 get_first_delay() ->
     case ets:whereis(?INDEX_TABLE) of

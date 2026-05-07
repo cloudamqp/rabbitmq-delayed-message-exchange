@@ -19,8 +19,6 @@
 
 -record(?MODULE, {}).
 
--define(BUCKET, <<"x-delayed-messages">>).
-
 -spec init_copy_to_khepri(StoreId, MigrationId, Tables) -> Ret when
       StoreId :: khepri:store_id(),
       MigrationId :: mnesia_to_khepri:migration_id(),
@@ -32,15 +30,7 @@ init_copy_to_khepri(_StoreId, _MigrationId, Tables) ->
        "Mnesia->Leveled init: tables ~0p",
        [Tables],
        #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
-    Path = filename:join([rabbit_plugins:user_provided_plugins_data_dir(),
-                          "rabbit_delayed_message",
-                          "leveled"]),
-    ok = filelib:ensure_path(Path),
-    {ok, Bookie} = leveled_bookie:book_start([{root_path, Path},
-                                              {compression_method, none}]),
-    %% Store under the same persistent_term key that rabbit_delayed_message_leveled
-    %% uses for its bookie, so setup/0 can close it before opening its own.
-    persistent_term:put({rabbit_delayed_message_leveled, bookie}, Bookie),
+    rabbit_delayed_message_leveled:start_db(),
     %% Signal the gen_server to switch to the leveled backend. The cast is
     %% non-blocking; is_enabled/1 in the handler uses blocking mode and waits
     %% until khepri_db is fully enabled (i.e. after all data has been copied)
@@ -69,9 +59,7 @@ copy_to_khepri(Table,
     %% a retried migration does not produce duplicate entries.
     KeySuffix = crypto:hash(md5, term_to_binary({TS, Exchange, Ref})),
     Key = <<TS:64/big, KeySuffix/binary>>,
-    Bookie = persistent_term:get({rabbit_delayed_message_leveled, bookie}),
-    case leveled_bookie:book_put(Bookie, ?BUCKET, Key,
-                                 term_to_binary({Exchange, Delivery}), []) of
+    case rabbit_delayed_message_leveled:internal_put(Key, Exchange, Delivery) of
         ok    -> ok;
         pause -> int_migration_pause()
     end,
