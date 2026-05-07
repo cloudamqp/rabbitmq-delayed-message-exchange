@@ -43,7 +43,12 @@ start_opts(Path) ->
     ExtractFun = fun(?DELAYED_MSG_TAG, _Size, delete) ->
                          {{0, 0, undefined}, []};
                     (?DELAYED_MSG_TAG, Size, {ExNameBin, _MsgBin}) ->
-                         {{erlang:phash2(ExNameBin), Size, ExNameBin}, []}
+                         % We can get rid of the `erlang:phash2(ExNameBin)` in
+                         % the first element of the tuple since leveled uses it
+                         % during compaction to detect value changes. Since
+                         % keys are unique and never overwritten the phash is
+                         % not needed to detect changes.
+                         {{0, Size, ExNameBin}, []}
                  end,
     [{root_path, Path},
      {compression_method, none},
