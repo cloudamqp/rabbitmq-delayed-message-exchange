@@ -71,7 +71,7 @@ messages_delayed(Exchange) ->
 
 store_delay(DelayTS, Exchange, Message) ->
     Key = make_key(DelayTS),
-    % Insert `{DelayTS, Key}' as ETS table key (wrapped in additional `{}')
+    %% Insert `{DelayTS, Key}' as ETS table key (wrapped in additional `{}')
     ets:insert(?INDEX_TABLE, {{DelayTS, Key}}),
     case internal_put(Key, Exchange, Message) of
         ok    -> ok;
@@ -97,9 +97,9 @@ get_first_delay() ->
     end.
 
 get_many({_TS, LeveledKey} = _IndexKey) ->
-    % We only return one entry per get_many call. This simplifies the
-    % implementation around index ETS and Leveled Bookie. We just let the
-    % gen_server trigger it's loop more times for leveled.
+    %% We only return one entry per get_many call. This simplifies the
+    %% implementation around index ETS and Leveled Bookie. We just let the
+    %% gen_server trigger its loop more times for leveled.
     case leveled_bookie:book_get(?BOOKIE, ?BUCKET, LeveledKey) of
         {ok, Value} ->
             [binary_to_term(Value)];
@@ -205,7 +205,6 @@ int_store_pause() ->
 
 delayed_per_exchange() ->
     FoldFun = fun(_B, _K, Term, Acc) ->
-                      % TODO: oof, having to transform each term aint good
                       {Exchange, _} = binary_to_term(Term),
                       maps:update_with(Exchange#exchange.name, fun(C) -> C + 1 end, 1, Acc)
               end,

@@ -189,7 +189,6 @@ routing_fanout(Config) ->
     routing_test0(Config, BKs, RKs, <<"fanout">>, Count).
 
 routing_test0(Config, BKs, RKs, ExType, Count) ->
-    ct:pal("========== Starging ~p test", [?FUNCTION_NAME]),
     Chan =  rabbit_ct_client_helpers:open_channel(Config),
 
     Ex = make_exchange_name(Config, "1"),

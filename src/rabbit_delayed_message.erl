@@ -65,11 +65,7 @@ await_khepri_and_setup() ->
     gen_server:cast(?MODULE, await_khepri_and_setup).
 
 %%--------------------------------------------------------------------
-% Gen server exports
 init([]) ->
-    % TODO: I removed the startup complexity + the `go/0` part in this module.
-    % Do I need to do something to compensate and ensure no message is waiting to be
-    % delayed/delay-expire without `timer` (i.e. `timer = not_set`)?
     setup(),
     _ = recover(),
     State0 = #state{timer = maybe_delay_first()},
@@ -260,9 +256,6 @@ recover_exchange_and_bindings(#exchange{name = XName} = X) ->
 %% also delete the entries when this process is not alive ie when the
 %% plugin is disabled.
 bump_routed_stats(ExName, Qs, State) ->
-    % TODO: I think the `#state.stats_state` is updated somewhere in rabbit
-    % and my guess is that that's done based on the mnesia table name that is
-    % passed in the `rabbit_mnesia_tables_to_khepri_db` module attribute.
     rabbit_global_counters:messages_routed(amqp091, length(Qs)),
     case rabbit_event:stats_level(State, #state.stats_state) of
         fine ->
