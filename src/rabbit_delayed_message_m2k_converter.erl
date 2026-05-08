@@ -11,7 +11,6 @@
 -include_lib("kernel/include/logger.hrl").
 -include_lib("khepri_mnesia_migration/src/kmm_logging.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("leveled/include/leveled.hrl").
 -include("rabbit_delayed_message.hrl").
 
 -export([init_copy_to_khepri/3,
