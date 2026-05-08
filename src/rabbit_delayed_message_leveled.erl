@@ -55,17 +55,20 @@ start_opts(Path) ->
      {reload_strategy, [{?DELAYED_MSG_TAG, retain}]},
      {override_functions, [{extract_metadata, ExtractFun}]}].
 
-setup() ->
+start_db() ->
     Path = filename:join([rabbit_plugins:user_provided_plugins_data_dir(),
                           "rabbit_delayed_message",
                           "leveled"]),
     ok = filelib:ensure_path(Path),
+    {ok, Bookie} = leveled_bookie:book_start(start_opts(Path)),
+    ?BOOKIE(Bookie).
+
+setup() ->
     %% Close any bookie left open by the migration converter so there is at most
     %% one bookie at this path at a time. Errors are swallowed; the data is safe
     %% on disk via the leveled journal and will be recovered by book_start/1.
     catch leveled_bookie:book_close(?BOOKIE),
-    {ok, Bookie} = leveled_bookie:book_start(start_opts(Path)),
-    ?BOOKIE(Bookie),
+    start_db(),
     init_index_and_counters().
 
 disable_plugin() ->
@@ -83,7 +86,7 @@ store_delay(DelayTS, Exchange, Message) ->
     Key = make_key(DelayTS),
     ets:insert(?INDEX_TABLE, {{DelayTS, Key}, ExNameBin}),
     case leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
-                            {ExNameBin, term_to_binary({Exchange, Message})},
+                            {ExNameBin, {Exchange, Message}},
                             [],
                             ?DELAYED_MSG_TAG) of
         ok    -> ok;
@@ -92,8 +95,11 @@ store_delay(DelayTS, Exchange, Message) ->
     increase_counter(ExNameBin).
 
 internal_put(Key, Exchange, Message) ->
+    ExNameBin = exchange_to_counter_bin(Exchange),
     leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
-                            term_to_binary({Exchange, Message}), []).
+                            {ExNameBin, {Exchange, Message}},
+                            [],
+                            ?DELAYED_MSG_TAG).
 
 get_first_delay() ->
     case ets:whereis(?INDEX_TABLE) of
@@ -113,8 +119,8 @@ get_many({_TS, LeveledKey} = _IndexKey) ->
     % implementation around index ETS and Leveled Bookie. We just let the
     % gen_server trigger it's loop more times for leveled.
     case leveled_bookie:book_get(?BOOKIE, ?BUCKET, LeveledKey, ?DELAYED_MSG_TAG) of
-        {ok, {_ExNameBin, MsgBin}} ->
-            [binary_to_term(MsgBin)];
+        {ok, {_ExNameBin, Msg}} ->
+            [Msg];
         _ ->
             []
     end;

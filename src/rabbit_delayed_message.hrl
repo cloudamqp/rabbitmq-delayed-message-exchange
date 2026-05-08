@@ -1,3 +1,4 @@
+-define(DELAYED_MSG_TAG, delayed_msg).
 -record(delay_key,
         { timestamp, %% timestamp delay
           exchange   %% rabbit_types:exchange()
