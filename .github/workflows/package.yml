@@ -17,12 +17,6 @@ jobs:
           - erlang_version: 26
             rebar3: '3.25.0'
             elixir-version: 1.18
-          - erlang_version: 27
-            rebar3: '3.25.0'
-            elixir-version: 1.18
-          - erlang_version: 28
-            rebar3: '3.25.0'
-            elixir-version: 1.18
 
     runs-on: ubuntu-latest
     steps:
