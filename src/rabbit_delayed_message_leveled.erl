@@ -136,10 +136,9 @@ delete({_DelayTS, LeveledKey} = IndexKey) ->
             %% Using book_put/6 instead of book_delete/4 since the latter
             %% hardcodes ?STD_TAG
             leveled_bookie:book_put(?BOOKIE, ?BUCKET, LeveledKey, delete, [], ?DELAYED_MSG_TAG),
-            ets:delete(?INDEX_TABLE, IndexKey),
-            case ShouldDecrease of
-                {true, ExNameBin} -> decrease_counter(ExNameBin);
-                false -> ok
+            case ets:take(?INDEX_TABLE, IndexKey) of
+                [{_, ExNameBin}] -> decrease_counter(ExNameBin);
+                [] -> ok
             end
     end.
 
