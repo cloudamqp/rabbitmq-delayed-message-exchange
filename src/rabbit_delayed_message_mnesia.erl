@@ -3,6 +3,9 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include("rabbit_delayed_message.hrl").
 
+-define(TABLE_NAME, append_to_atom(rabbit_delayed_message, node())).
+-define(INDEX_TABLE_NAME, append_to_atom(?TABLE_NAME, "_index")).
+
 -rabbit_mnesia_tables_to_khepri_db(
    [{{mfa, rabbit_delayed_message_mnesia, table_names, []},
      rabbit_delayed_message_m2k_converter}]).
@@ -14,14 +17,14 @@
          get_first_delay/0,
          get_many/1,
          delete/1,
-         delete_empty_key/1,
-         append_to_atom/2
+         delete_empty_key/1
         ]).
 
 %% For testing, debugging and manual use
 -export([table_name/0,
          index_table_name/0,
-         table_names/0]).
+         table_names/0,
+         append_to_atom/2]).
 
 %%--------------------------------------------------------------------
 
