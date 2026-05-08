@@ -1,26 +1,59 @@
 name: Test
+
 on:
-  push:
-    branches:
-      - main
-      - v3.13.x
-      - v3.12.x
   pull_request:
+  push:
+
+env:
+  SERVER_FOLDER: rabbitmq-server
+  PLUGIN_FOLDER: rabbitmq-server/deps/rabbitmq-delayed-message-exchange
+
 jobs:
   test:
+    name: Checks on OTP ${{ matrix.erlang_version }}
+
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        bazel_otp_name:
-          - "26_2"
-    uses: rabbitmq/rabbitmq-lvc-exchange/.github/workflows/bazel-test.yml@main
-    with:
-      bazel_otp_name: ${{ matrix.bazel_otp_name }}
-  summary:
-    needs:
-    - test
-    runs-on: ubuntu-latest
+        include:
+        - erlang_version: "26"
+          elixir_version: "1.17.x"
+          rabbitmq_version: "v4.2.6"
+        - erlang_version: "27"
+          elixir_version: "1.17.x"
+          rabbitmq_version: "v4.2.6"
+        - erlang_version: "28"
+          elixir_version: "1.17.x"
+          rabbitmq_version: "v4.2.6"
+
     steps:
-    - name: SUMMARY
-      run: |
-        echo "SUCCESS"
+      - name: Checkout RabbitMQ Server
+        uses: actions/checkout@v6
+        with:
+          repository: rabbitmq/rabbitmq-server
+          ref: ${{ matrix.rabbitmq_version }}
+          path: ${{ env.SERVER_FOLDER }}
+
+      - name: Checkout Plugin
+        uses: actions/checkout@v6
+        with:
+          path: ${{ env.PLUGIN_FOLDER }}
+
+      - name: Install Erlang and Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{matrix.erlang_version}}
+          elixir-version: ${{matrix.elixir_version}}
+
+      - name: Run tests
+        working-directory: ${{ env.PLUGIN_FOLDER }}
+        run: |
+          make ct RABBITMQ_VERSION=${{matrix.rabbitmq_version}}
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: test-logs-${{ matrix.erlang_version }}
+          path: ${{ env.SERVER_FOLDER }}/logs/
