@@ -42,13 +42,13 @@
 start_opts(Path) ->
     ExtractFun = fun(?DELAYED_MSG_TAG, _Size, delete) ->
                          {{0, 0, undefined}, []};
-                    (?DELAYED_MSG_TAG, Size, {ExNameBin, _MsgBin}) ->
+                    (?DELAYED_MSG_TAG, Size, {Exchange, _Msg}) ->
                          % We can get rid of the `erlang:phash2(ExNameBin)` in
                          % the first element of the tuple since leveled uses it
                          % during compaction to detect value changes. Since
                          % keys are unique and never overwritten the phash is
                          % not needed to detect changes.
-                         {{0, Size, ExNameBin}, []}
+                         {{0, Size, exchange_to_counter_bin(Exchange)}, []}
                  end,
     [{root_path, Path},
      {compression_method, none},
@@ -85,19 +85,15 @@ store_delay(DelayTS, Exchange, Message) ->
     ExNameBin = exchange_to_counter_bin(Exchange),
     Key = make_key(DelayTS),
     ets:insert(?INDEX_TABLE, {{DelayTS, Key}, ExNameBin}),
-    case leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
-                            {ExNameBin, {Exchange, Message}},
-                            [],
-                            ?DELAYED_MSG_TAG) of
+    case internal_put(Key, Exchange, Message) of
         ok    -> ok;
         pause -> int_store_pause()
     end,
     increase_counter(ExNameBin).
 
 internal_put(Key, Exchange, Message) ->
-    ExNameBin = exchange_to_counter_bin(Exchange),
     leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
-                            {ExNameBin, {Exchange, Message}},
+                            {Exchange, Message},
                             [],
                             ?DELAYED_MSG_TAG).
 
@@ -119,7 +115,7 @@ get_many({_TS, LeveledKey} = _IndexKey) ->
     % implementation around index ETS and Leveled Bookie. We just let the
     % gen_server trigger it's loop more times for leveled.
     case leveled_bookie:book_get(?BOOKIE, ?BUCKET, LeveledKey, ?DELAYED_MSG_TAG) of
-        {ok, {_ExNameBin, Msg}} ->
+        {ok, Msg} ->
             [Msg];
         _ ->
             []
@@ -135,10 +131,6 @@ delete({_DelayTS, LeveledKey} = IndexKey) ->
         undefined ->
             ok;
         _ ->
-            ShouldDecrease = case ets:lookup(?INDEX_TABLE, IndexKey) of
-                [{_, ExNameBin0}] -> {true, ExNameBin0};
-                []               -> false
-            end,
             %% Using book_put/6 instead of book_delete/4 since the latter
             %% hardcodes ?STD_TAG
             leveled_bookie:book_put(?BOOKIE, ?BUCKET, LeveledKey, delete, [], ?DELAYED_MSG_TAG),
@@ -239,5 +231,5 @@ list_all_keys() ->
 %% Named for debugging: trace this function to observe backpressure events
 %% during normal operation.
 int_store_pause() ->
-    rabbit_log:warning("Delayed message store pausing due to backpressure from Leveled Bookie"),
+    rabbit_log:warning("Delayed message store pausing due to backpressure from Leveled Bookie", []),
     timer:sleep(1000).
