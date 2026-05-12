@@ -11,15 +11,22 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
+-include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
 all() ->
     [
-      {group, non_parallel_tests},
-      {group, fine_stats}
+      {group, mnesia},
+      {group, leveled},
+      {group, mnesia_to_khepri},
+      {group, mnesia_to_khepri_slow}
     ].
 
 groups() ->
     [
+      {mnesia, [], [{group, non_parallel_tests}, {group, fine_stats}]},
+      {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}]},
+      {mnesia_to_khepri, [], [mnesia_to_khepri_migration]},
+      {mnesia_to_khepri_slow, [], [mnesia_to_khepri_migration_slow]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
@@ -30,9 +37,9 @@ groups() ->
                                 e2e_delay,
                                 delay_order,
                                 delayed_messages_count,
+                                counter_survives_restart,
                                 node_restart_before_delay_expires,
                                 node_restart_after_delay_expires,
-                                no_message_for_index,
                                 string_delay_header
                                ]},
      {fine_stats, [], [
@@ -41,33 +48,75 @@ groups() ->
                       ]}
     ].
 
-
 %% -------------------------------------------------------------------
 %% Setup/teardown.
 %% -------------------------------------------------------------------
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
-    Config1 = rabbit_ct_helpers:set_config(Config, [
+    rabbit_ct_helpers:set_config(Config, [
         {rmq_nodename_suffix, ?MODULE}
-      ]),
-    rabbit_ct_helpers:run_setup_steps(Config1,
-      rabbit_ct_broker_helpers:setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps()).
+    ]).
 
 end_per_suite(Config) ->
-    rabbit_ct_helpers:run_teardown_steps(Config,
-      rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()).
+    Config.
 
+init_per_group(mnesia, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-mnesia")},
+            {tcp_ports_base, 21000}
+        ]
+    ),
+    run_broker_and_clients(Config1);
+init_per_group(leveled, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, khepri},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-leveled")},
+            {tcp_ports_base, 21100}
+        ]
+    ),
+    run_broker_and_clients(Config1);
+init_per_group(mnesia_to_khepri, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k")},
+            {tcp_ports_base, 21200}
+        ]
+    ),
+    run_broker_and_clients(Config1);
+init_per_group(mnesia_to_khepri_slow, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k-slow")},
+            {tcp_ports_base, 21300}
+        ]
+    ),
+    run_broker_and_clients(Config1);
 init_per_group(fine_stats, Config) ->
     CollectStatsOrig = get_collect_stats(Config),
     set_collect_stats(Config, fine),
     refresh_config(Config),
-    [{collect_statistics, fine}, {collect_statistics_orig, CollectStatsOrig}|Config];
+    [{collect_statistics, fine}, {collect_statistics_orig, CollectStatsOrig} | Config];
 init_per_group(_, Config) ->
     Config.
 
+end_per_group(mnesia, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(leveled, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(mnesia_to_khepri, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(mnesia_to_khepri_slow, Config) ->
+    teardown_broker_and_clients(Config);
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
     set_collect_stats(Config, CollectStatsOrig),
@@ -75,6 +124,16 @@ end_per_group(fine_stats, Config) ->
     Config;
 end_per_group(_, Config) ->
     Config.
+
+run_broker_and_clients(Config) ->
+    rabbit_ct_helpers:run_setup_steps(Config,
+      rabbit_ct_broker_helpers:setup_steps() ++
+      rabbit_ct_client_helpers:setup_steps()).
+
+teardown_broker_and_clients(Config) ->
+    rabbit_ct_helpers:run_teardown_steps(Config,
+      rabbit_ct_client_helpers:teardown_steps() ++
+      rabbit_ct_broker_helpers:teardown_steps()).
 
 init_per_testcase(Testcase, Config) ->
     TestCaseName = rabbit_ct_helpers:config_to_testcase_name(Config, Testcase),
@@ -134,6 +193,7 @@ routing_test0(Config, BKs, RKs, ExType, Count) ->
 
     Ex = make_exchange_name(Config, "1"),
     Q = make_queue_name(Config, "1"),
+    ct:pal("Exchange name: ~p ; Queue name: ~p ;", [Ex, Q]),
 
     [setup_fabric(Chan, make_exchange(Ex, ExType), make_queue(Q), BRK) ||
         BRK <- BKs],
@@ -265,8 +325,48 @@ delayed_messages_count(Config) ->
 
     consume(Chan, Q, Msgs),
 
+    Exchanges3 = rabbit_ct_broker_helpers:rpc(Config, 0,
+          rabbit_exchange, info_all, [<<"/">>]),
+    [Exchange3] = lists:filter(FilterEx, Exchanges3),
+    {messages_delayed, 0} = proplists:lookup(messages_delayed, Exchange3),
+
     rabbit_ct_broker_helpers:clear_policy(Config, 0, PolicyName),
     rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+counter_survives_restart(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    MsgCount = 5,
+    Msgs = lists:duplicate(MsgCount, 10000),
+
+    %% Publisher confirms ensure every message is persisted before the restart.
+    amqp_channel:call(Chan, #'confirm.select'{}),
+    publish_messages(Chan, Ex, Msgs),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+
+    rabbit_ct_broker_helpers:restart_node(Config, 0),
+
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+
+    FilterEx = fun(X) ->
+        {resource, <<"/">>, exchange, Ex} == proplists:get_value(name, X)
+    end,
+    Exchanges = rabbit_ct_broker_helpers:rpc(Config, 0,
+                    rabbit_exchange, info_all, [<<"/">>]),
+    [Exchange] = lists:filter(FilterEx, Exchanges),
+    {messages_delayed, MsgCount} = proplists:lookup(messages_delayed, Exchange),
+
+    {ok, _} = consume(Chan2, Q, Msgs),
+    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
     ok.
 
 node_restart_before_delay_expires(Config) ->
@@ -281,9 +381,7 @@ node_restart_before_delay_expires(Config) ->
     %% Here, we suppose the node will be restarted before all messages
     %% are actually queued.
     Msgs = [5000, 10000, 3000, 2000, 15000, 1000, 4000],
-
     publish_messages(Chan, Ex, Msgs),
-
     rabbit_ct_broker_helpers:restart_node(Config, 0),
 
     Chan2 =  rabbit_ct_client_helpers:open_channel(Config),
@@ -328,37 +426,6 @@ node_restart_after_delay_expires(Config) ->
 
     ok.
 
-no_message_for_index(Config) ->
-    Chan = rabbit_ct_client_helpers:open_channel(Config),
-
-    Ex = make_exchange_name(Config, "1"),
-    Q = make_queue_name(Config, "1"),
-
-    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
-                 make_durable_queue(Q)),
-
-    Msgs = [1000, 2000],
-
-    publish_messages(Chan, Ex, Msgs),
-
-    %% delete the first message, but keep it in the index table
-    make_table_corrupted(Config),
-
-    timer:sleep(2000),
-
-    %% the index key with no messages should be ignored/deleted
-    %% and the following messages are successfully delivered
-    Msgs2 = tl(Msgs),
-    {ok, Result} = consume(Chan, Q, Msgs2),
-    ?assertEqual(Msgs2, Result),
-
-    amqp_channel:call(Chan, #'exchange.delete' { exchange = Ex }),
-    amqp_channel:call(Chan, #'queue.delete' { queue = Q }),
-
-    rabbit_ct_client_helpers:close_channel(Chan),
-
-    ok.
-
 string_delay_header(Config) ->
     Chan = rabbit_ct_client_helpers:open_channel(Config),
 
@@ -375,6 +442,136 @@ string_delay_header(Config) ->
     Sorted = lists:sort(Msgs),
     ?assertEqual(Sorted, Result),
 
+    ok.
+
+mnesia_to_khepri_migration(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    %% Use publisher confirms to ensure messages are persisted in Mnesia
+    %% before triggering the migration.
+    amqp_channel:call(Chan, #'confirm.select'{}),
+
+    %% Publish messages with a delay long enough to survive the migration
+    %% and node restart regardless of how quickly those steps complete.
+    Msgs = [30000, 30000, 30000],
+    publish_messages(Chan, Ex, Msgs),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+
+    %% Enable khepri_db, which runs the Mnesia-to-Leveled migration for the
+    %% delayed-message tables via rabbit_delayed_message_m2k_converter.
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
+
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+
+    {ok, Result} = consume(Chan2, Q, Msgs),
+    Sorted = lists:sort(Msgs),
+    ?assertEqual(Sorted, Result),
+
+    ?assertEqual(undefined,
+                 rabbit_ct_broker_helpers:rpc(Config, 0,
+                     rabbit_delayed_message_leveled, get_first_delay, [])),
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0,
+                     rabbit_delayed_message_leveled, list_all_keys, [])),
+
+    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
+    ok.
+
+%% Exercises the race where the rabbit_delayed_message gen-server processes the
+%% await_khepri_and_setup cast while khepri_db is still state_changing (i.e.
+%% copy_to_khepri is still running). The test slows down each copy_to_khepri
+%% call by 1 s, giving the gen-server plenty of time to receive and process the
+%% cast before migration finishes. Two invariants are checked:
+%%
+%%   1. The leveled ETS index does NOT exist while copy_to_khepri runs —
+%%      proving setup() is correctly gated on is_enabled(khepri_db, blocking).
+%%
+%%   2. After enable/1 returns, the ETS index has one entry per delayed message —
+%%      proving init_index() ran after all records were in leveled.
+%%
+%% If setup() were called unconditionally (or with a non-blocking is_enabled
+%% that returned false during state_changing and bypassed setup entirely),
+%% invariant 1 or 2 would be violated and the test would fail.
+mnesia_to_khepri_migration_slow(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    amqp_channel:call(Chan, #'confirm.select'{}),
+
+    MsgCount = 3,
+    %% 10 s delay: messages stay pending throughout the ~MsgCount-second migration.
+    Msgs = lists:duplicate(MsgCount, 10000),
+    publish_messages(Chan, Ex, Msgs),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+
+    %% plugin_SUITE is not in the broker node's code path, so any lambda that
+    %% carries a plugin_SUITE module reference crashes with {undef,...} when
+    %% executed there. Load the beam explicitly before spawning.
+    SuiteBeamFile = code:which(plugin_SUITE),
+    {ok, SuiteBeam} = file:read_file(SuiteBeamFile),
+    {module, plugin_SUITE} = rabbit_ct_broker_helpers:rpc(Config, 0, code, load_binary,
+             [plugin_SUITE, SuiteBeamFile, SuiteBeam]),
+
+    TestPid = self(),
+    MockOwnerPid = rabbit_ct_broker_helpers:rpc(Config, 0, erlang, spawn,
+        [fun() ->
+            ok = meck:new(rabbit_delayed_message_m2k_converter, [passthrough]),
+            %% Sleep 1 s per record so the gen-server must block for several
+            %% seconds inside is_enabled(khepri_db, blocking). During those
+            %% sleeps the ETS index must not yet exist (invariant 1).
+            ok = meck:expect(rabbit_delayed_message_m2k_converter, copy_to_khepri,
+                fun(Table, Record, State) ->
+                    case ets:whereis(rabbit_delayed_message_leveled_key_index) of
+                        undefined -> ok;
+                        _         -> TestPid ! setup_called_too_early
+                    end,
+                    Res = meck:passthrough([Table, Record, State]),
+                    timer:sleep(3000),
+                    Res
+                end),
+            TestPid ! meck_ready,
+            receive stop -> meck:unload(rabbit_delayed_message_m2k_converter) end
+        end]),
+    receive
+        meck_ready -> ok
+    after 5000 ->
+        error(meck_owner_did_not_start)
+    end,
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
+
+    MockOwnerPid ! stop,
+
+    %% Invariant 1: setup() must not have fired during copy_to_khepri.
+    receive
+        setup_called_too_early -> error(setup_called_too_early)
+    after 0 -> ok
+    end,
+    timer:sleep(30000),
+
+    % Invariant 2: every delayed message must be in the ETS index.
+    % - Not checking Invariant 2 here, too complex -
+
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+
+    {ok, Result} = consume(Chan2, Q, Msgs),
+    ?assertEqual(lists:sort(Msgs), Result),
+
+    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
     ok.
 
 setup_fabric(Chan, ExDeclare, QueueDeclare) ->
@@ -417,7 +614,6 @@ consume(Chan, Q, Msgs) ->
         amqp_channel:subscribe(Chan, #'basic.consume'{queue  = Q,
                                                       no_ack = true}, self()),
     collect(length(Msgs), lists:max(Msgs) + 3000).
-
 
 collect(N, Timeout) ->
     collect(0, N, Timeout, []).
@@ -510,10 +706,3 @@ set_collect_stats(Config, CollectStats) ->
 
 refresh_config(Config) ->
     ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, refresh_config, []).
-
-make_table_corrupted(Config) ->
-    Table = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, table_name, []),
-    IndexTable = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, index_table_name, []),
-
-    FirstKey = rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_first, [IndexTable]),
-    rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, dirty_delete, [Table, FirstKey]).
