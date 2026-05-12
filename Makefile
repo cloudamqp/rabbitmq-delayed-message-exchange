@@ -45,11 +45,12 @@ ERLANG_MK_COMMIT = rabbitmq-tmp
 include rabbitmq-components.mk
 include erlang.mk
 
-# After deps are fetched, strip lz4 and zstd from leveled's OTP application
-# dependency list so they are never started. See comment above DEPS for why.
+# Strip lz4 and zstd from leveled's OTP application list. Patching the source
+# .app.src file means the generated leveled.app will already have them absent
+# when leveled is compiled. See comment above DEPS for why the patch is needed
 autopatch-leveled::
-	$(verbose) if [ -f $(DEPS_DIR)/leveled/ebin/leveled.app ]; then \
-		erl -noshell -eval 'F = "$(DEPS_DIR)/leveled/ebin/leveled.app", {ok, [{application, Name, Props}]} = file:consult(F), Apps = proplists:get_value(applications, Props, []), Apps2 = Apps -- [lz4, zstd], case Apps2 =:= Apps of true -> ok; false -> Props2 = lists:keystore(applications, 1, Props, {applications, Apps2}), ok = file:write_file(F, io_lib:format("~tp.~n", [{application, Name, Props2}])) end' -s init stop; \
+	$(verbose) if [ -f $(DEPS_DIR)/leveled/src/leveled.app.src ]; then \
+		erl -noshell -eval 'F = "$(DEPS_DIR)/leveled/src/leveled.app.src", {ok, [{application, Name, Props}]} = file:consult(F), Apps = proplists:get_value(applications, Props, []), Apps2 = Apps -- [lz4, zstd], case Apps2 =:= Apps of true -> ok; false -> Props2 = lists:keystore(applications, 1, Props, {applications, Apps2}), ok = file:write_file(F, io_lib:format("~tp.~n", [{application, Name, Props2}])) end' -s init stop; \
 	fi
 
 benchmarks: test-build
