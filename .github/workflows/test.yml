@@ -24,7 +24,7 @@ jobs:
           elixir_version: "1.17.x"
           rabbitmq_version: "v4.2.6"
         - erlang_version: "28"
-          elixir_version: "1.17.x"
+          elixir_version: "1.19.x"
           rabbitmq_version: "v4.2.6"
 
     steps:
