@@ -9,6 +9,8 @@
 -include_lib("kernel/include/logger.hrl").
 -include("rabbit_delayed_message.hrl").
 
+-define(APP, rabbitmq_delayed_message_exchange).
+
 -behaviour(gen_server).
 
 % Public API exports
@@ -66,6 +68,10 @@ await_khepri_and_setup() ->
 
 %%--------------------------------------------------------------------
 init([]) ->
+    %% Trap exits so terminate/2 runs on supervisor shutdown and we get
+    %% a chance to tear down the storage backend symmetrically with
+    %% setup/0.
+    process_flag(trap_exit, true),
     setup(),
     _ = recover(),
     State0 = #state{timer = maybe_delay_first()},
@@ -96,11 +102,32 @@ handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
             delete(Key)
     end,
     {noreply, State#state{timer = maybe_delay_first()}};
+handle_info({'EXIT', _Pid, normal}, State) ->
+    {noreply, State};
+handle_info({'EXIT', _Pid, Reason}, State) ->
+    %% We trap exits so the supervisor's shutdown signal lands in
+    %% terminate/2, but a linked process dying abnormally (the Leveled
+    %% bookie is the only one we link to) must still take us down so
+    %% the supervisor can restart us and reopen the store.
+    {stop, Reason, State};
 handle_info(_I, State) ->
     {noreply, State}.
 
 terminate(_, _) ->
-    ok.
+    %% terminate/2 fires for both plugin disable and broker shutdown.
+    %% Only the former should destroy the storage backend; on broker
+    %% shutdown delayed messages must survive across restarts. Neither
+    %% rabbit:is_running/0 nor rabbit_boot_state:get/0 distinguishes
+    %% the two at this point — apps stop in reverse dependency order,
+    %% so our plugin stops while rabbit itself is still in `ready' on
+    %% broker shutdown. rabbit_plugins:disable/1 however rewrites the
+    %% enabled-plugins file before calling stop_apps/1, so at
+    %% terminate time enabled_plugins/0 no longer lists us iff we are
+    %% being disabled.
+    case lists:member(?APP, rabbit_plugins:enabled_plugins()) of
+        true  -> ok;              %% broker shutdown — keep data
+        false -> disable_plugin() %% plugin disable — tear down
+    end.
 
 code_change(_, State, _) -> {ok, State}.
 
