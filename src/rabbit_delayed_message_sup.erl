@@ -13,15 +13,7 @@
 
 -define(SERVER, ?MODULE).
 
--export([start_link/0]).
-
--export([init/1, stop/0]).
-
--rabbit_boot_step({rabbit_delayed_message_supervisor,
-                   [{description, "delayed message sup"},
-                    {mfa,         {rabbit_sup, start_child, [?MODULE]}},
-                    {requires,    pre_flight},
-                    {cleanup,     {?MODULE, stop, []}}]}).
+-export([start_link/0, init/1]).
 
 start_link() ->
     supervisor2:start_link({local, ?SERVER}, ?MODULE, []).
@@ -30,7 +22,3 @@ init([]) ->
     {ok, {{one_for_one, 3, 10},
           [{rabbit_delayed_message, {rabbit_delayed_message, start_link, []},
             transient, ?WORKER_WAIT, worker, [rabbit_delayed_message]}]}}.
-
-stop() ->
-    ok = supervisor:terminate_child(rabbit_sup, ?MODULE),
-    ok = supervisor:delete_child(rabbit_sup, ?MODULE).
