@@ -344,7 +344,7 @@ counter_survives_restart(Config) ->
                  make_durable_queue(Q)),
 
     MsgCount = 5,
-    Msgs = lists:duplicate(MsgCount, 10000),
+    Msgs = lists:duplicate(MsgCount, 30000),
 
     %% Publisher confirms ensure every message is persisted before the restart.
     amqp_channel:call(Chan, #'confirm.select'{}),
