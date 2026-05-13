@@ -24,7 +24,8 @@ all() ->
 groups() ->
     [
       {mnesia, [], [{group, non_parallel_tests}, {group, fine_stats}]},
-      {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}]},
+      {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}, {group, leveled_only}]},
+      {leveled_only, [], [disable_cleanup]},
       {mnesia_to_khepri, [], [mnesia_to_khepri_migration]},
       {mnesia_to_khepri_slow, [], [mnesia_to_khepri_migration_slow]},
       {non_parallel_tests, [], [
@@ -173,6 +174,62 @@ routing_topic(Config) ->
     %% all except <<"b.b.c">> should be routed.
     Count = 3,
     routing_test0(Config, BKs, RKs, <<"topic">>, Count).
+
+disable_cleanup(Config) ->
+    LeveledIndex = rabbit_delayed_message_leveled_key_index,
+    EtsWhereis = fun(T) ->
+        rabbit_ct_broker_helpers:rpc(Config, 0, ets, whereis, [T])
+    end,
+    JournalFiles = filename:join(
+                     [rabbit_ct_broker_helpers:rpc(
+                        Config, 0, rabbit_plugins,
+                        user_provided_plugins_data_dir, []),
+                      "rabbit_delayed_message", "leveled",
+                      "journal", "journal_files"]),
+    %% book_destroy/1 empties the journal and ledger dirs but leaves
+    %% the empty parent directories on disk, so the test asserts on
+    %% file count rather than directory existence.
+    JournalFileCount = fun() ->
+        case rabbit_ct_broker_helpers:rpc(
+               Config, 0, file, list_dir, [JournalFiles]) of
+            {ok, Files}     -> length(Files);
+            {error, enoent} -> 0
+        end
+    end,
+
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+    setup_fabric(Chan, make_exchange(Ex, <<"direct">>), make_queue(Q), <<"k">>),
+
+    %% Publish one delayed message so the Leveled store has data on
+    %% disk and the index ETS table has a key.
+    amqp_channel:call(Chan, #'confirm.select'{}),
+    publish_messages(Chan, Ex, <<"k">>, [60000]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+
+    %% Pre-conditions: the index ETS table is registered and the
+    %% on-disk journal has at least one file.
+    ?assertNotEqual(undefined, EtsWhereis(LeveledIndex)),
+    ?assert(JournalFileCount() > 0),
+
+    amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan),
+
+    %% Disable: terminate/2 calls
+    %% rabbit_delayed_message_leveled:disable_plugin/0 which destroys
+    %% the bookie's on-disk data.
+    ok = rabbit_ct_broker_helpers:disable_plugin(
+           Config, 0, rabbitmq_delayed_message_exchange),
+    ?awaitMatch(undefined, EtsWhereis(LeveledIndex), 5000),
+    ?awaitMatch(0, JournalFileCount(), 5000),
+
+    %% Re-enable: the Leveled store is recreated fresh by setup/0.
+    ok = rabbit_ct_broker_helpers:enable_plugin(
+           Config, 0, rabbitmq_delayed_message_exchange),
+    ?awaitMatch(T when T =/= undefined, EtsWhereis(LeveledIndex), 10000),
+    ok.
 
 routing_direct(Config) ->
     BKs = [<<"mykey">>],
