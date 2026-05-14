@@ -42,14 +42,13 @@ Mnesia-stored delayed messages are migrated to Leveled automatically.
 The latest version of this plugin [requires Erlang 26.2 or later versions](https://www.rabbitmq.com/docs/which-erlang).
 
 
-
 ## Installation
 
 ### Download a Binary Build
 
-Binary builds are distributed [via GitHub releases](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases).
+Binary builds are distributed [via GitHub releases](https://github.com/cloudamqp/rabbitmq-delayed-message-exchange/releases).
 
-As with all 3rd party plugins, the `.ez` file must be copied into a [node's plugins directory](https://rabbitmq.com/plugins.html#plugin-directories)
+As with all 3rd party plugins, the `.ez` files the release provides must be copied into a [node's plugins directory](https://rabbitmq.com/plugins.html#plugin-directories)
 with sufficient permissions for the effective user of the RabbitMQ process to load it from disk.
 
 To find out what the plugins directory is, use `rabbitmq-plugins directories`
@@ -179,9 +178,9 @@ HAVEN'T BEEN DELIVERED WILL BE LOST**.
 ## Building the Plugin
 
 ```shell
-PROJECT_VERSION=4.2.0-rc.1 PRODUCT_VERSION=4.2.0-rc.1 VERSION=4.2.0-rc.1 \
-    gmake dist PROJECT_VERSION=4.2.0-rc.1 PRODUCT_VERSION=4.2.0-rc.1 \
-    VERSION=4.2.0-rc.1 DIST_AS_EZS=true
+PROJECT_VERSION=4.2.6-rc.1 PRODUCT_VERSION=4.2.6-rc.1 VERSION=4.2.6-rc.1 \
+    gmake dist PROJECT_VERSION=4.2.6-rc.1 PRODUCT_VERSION=4.2.6-rc.1 \
+    VERSION=4.2.6-rc.1 DIST_AS_EZS=true
 ```
 
 The EZ file is created in the `plugins` directory.
