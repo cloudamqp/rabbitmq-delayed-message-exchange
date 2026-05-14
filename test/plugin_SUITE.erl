@@ -32,6 +32,7 @@ groups() ->
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
                                 routing_topic,
+                                routing_topic_unbind_stops_routing,
                                 routing_direct,
                                 routing_fanout,
                                 e2e_nodelay,
@@ -175,7 +176,15 @@ routing_topic(Config) ->
     Count = 3,
     routing_test0(Config, BKs, RKs, <<"topic">>, Count).
 
+%% Regression: disabling the plugin must run the cleanup boot steps.
+%% Two pieces of state need to be released:
+%%   * the Khepri topic trie projection and its ETS table
+%%     (rabbit_delayed_message_topic_trie)
+%%   * the Leveled delayed-message store (its in-memory key index ETS
+%%     table and the on-disk bookie directory)
+%% Re-enabling must restore both.
 disable_cleanup(Config) ->
+    Trie = rabbit_delayed_message_topic_trie,
     LeveledIndex = rabbit_delayed_message_leveled_key_index,
     EtsWhereis = fun(T) ->
         rabbit_ct_broker_helpers:rpc(Config, 0, ets, whereis, [T])
@@ -200,16 +209,17 @@ disable_cleanup(Config) ->
     Chan = rabbit_ct_client_helpers:open_channel(Config),
     Ex = make_exchange_name(Config, "1"),
     Q = make_queue_name(Config, "1"),
-    setup_fabric(Chan, make_exchange(Ex, <<"direct">>), make_queue(Q), <<"k">>),
+    setup_fabric(Chan, make_exchange(Ex, <<"topic">>), make_queue(Q), <<"a.*.c">>),
 
     %% Publish one delayed message so the Leveled store has data on
     %% disk and the index ETS table has a key.
     amqp_channel:call(Chan, #'confirm.select'{}),
-    publish_messages(Chan, Ex, <<"k">>, [60000]),
+    publish_messages(Chan, Ex, <<"a.b.c">>, [60000]),
     amqp_channel:wait_for_confirms_or_die(Chan),
 
-    %% Pre-conditions: the index ETS table is registered and the
-    %% on-disk journal has at least one file.
+    %% Pre-conditions: both the projection table and the Leveled state
+    %% (index ETS and on-disk journal files) exist.
+    ?assertNotEqual(undefined, EtsWhereis(Trie)),
     ?assertNotEqual(undefined, EtsWhereis(LeveledIndex)),
     ?assert(JournalFileCount() > 0),
 
@@ -217,18 +227,55 @@ disable_cleanup(Config) ->
     amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
     rabbit_ct_client_helpers:close_channel(Chan),
 
-    %% Disable: terminate/2 calls
+    %% Disable: cleanup steps unregister the projection and tear down
+    %% the Leveled store (the gen_server's terminate/2 calls
     %% rabbit_delayed_message_leveled:disable_plugin/0 which destroys
-    %% the bookie's on-disk data.
+    %% the bookie's on-disk data).
     ok = rabbit_ct_broker_helpers:disable_plugin(
            Config, 0, rabbitmq_delayed_message_exchange),
+    ?awaitMatch(undefined, EtsWhereis(Trie), 5000),
     ?awaitMatch(undefined, EtsWhereis(LeveledIndex), 5000),
     ?awaitMatch(0, JournalFileCount(), 5000),
 
-    %% Re-enable: the Leveled store is recreated fresh by setup/0.
+    %% Re-enable: both pieces of state come back. Registration is
+    %% idempotent for the projection; the Leveled store is recreated
+    %% fresh by setup/0.
     ok = rabbit_ct_broker_helpers:enable_plugin(
            Config, 0, rabbitmq_delayed_message_exchange),
+    ?awaitMatch(T when T =/= undefined, EtsWhereis(Trie), 5000),
     ?awaitMatch(T when T =/= undefined, EtsWhereis(LeveledIndex), 10000),
+    ok.
+
+%% Regression: removing a topic binding must also remove it from the
+%% Khepri topic trie projection, so further publishes do not route.
+routing_topic_unbind_stops_routing(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+    BK = <<"a.*.c">>,
+    setup_fabric(Chan, make_exchange(Ex, <<"topic">>), make_queue(Q), BK),
+    amqp_channel:call(Chan, #'confirm.select'{}),
+
+    %% Before unbind: message routes.
+    publish_messages(Chan, Ex, <<"a.b.c">>, [0]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    #'queue.declare_ok'{message_count = C1} =
+        amqp_channel:call(Chan, make_queue(Q)),
+    ?assertEqual(1, C1),
+
+    #'queue.purge_ok'{} =
+        amqp_channel:call(Chan, #'queue.purge'{queue = Q}),
+    #'queue.unbind_ok'{} =
+        amqp_channel:call(Chan, #'queue.unbind'{queue = Q,
+                                                exchange = Ex,
+                                                routing_key = BK}),
+
+    %% After unbind: no routing.
+    publish_messages(Chan, Ex, <<"a.b.c">>, [0]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    #'queue.declare_ok'{message_count = C2} =
+        amqp_channel:call(Chan, make_queue(Q)),
+    ?assertEqual(0, C2),
     ok.
 
 routing_direct(Config) ->

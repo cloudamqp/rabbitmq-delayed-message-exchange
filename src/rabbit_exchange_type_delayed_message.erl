@@ -17,6 +17,14 @@
      {requires,    rabbit_registry},
      {enables,     recovery}]}).
 
+-rabbit_boot_step(
+   {rabbit_delayed_message_topic_trie_projection,
+    [{description, "exchange type x-delayed-message: Khepri topic trie"},
+     {mfa,         {?MODULE, register_topic_trie_projection, []}},
+     {cleanup,     {?MODULE, unregister_topic_trie_projection, []}},
+     {requires,    core_initialized},
+     {enables,     recovery}]}).
+
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
 
@@ -30,6 +38,8 @@
          create/2, delete/2, policy_changed/2,
          add_binding/3, remove_bindings/3, assert_args_equivalence/2]).
 -export([info/1, info/2]).
+-export([register_topic_trie_projection/0,
+         unregister_topic_trie_projection/0]).
 
 -define(EXCHANGE(Ex), (exchange_module(Ex))).
 -define(ERL_MAX_T, 4294967295). %% Max timer delay, per Erlang docs.
@@ -54,12 +64,44 @@ route(X = #exchange{name = Name},
                     %% table rabbit_index_route only stores bindings whose source exchange
                     %% is of type direct exchange.
                     rabbit_router:match_routing_key(Name, RKs);
+                rabbit_exchange_type_topic ->
+                    %% Under Khepri, rabbit's topic trie projection filters
+                    %% on type=topic and ignores our x-delayed-message
+                    %% bindings, so we query our own projection. Under
+                    %% Mnesia, the rabbit topic trie tables are populated
+                    %% via ?EXCHANGE(X):add_binding/3 keyed by our
+                    %% exchange's name, so the stock topic route fn works.
+                    %%
+                    %% Notice that Opts are not passed in case of
+                    %% Khepri. The `return_binding_keys' option is
+                    %% only used for the MQTT 5 feature to return
+                    %% Subscription Identifiers to the publishers. It
+                    %% could only be returned to MQTT publishers when
+                    %% not delaying messages. It is not applicable for
+                    %% delayed messages (where upon publishing the
+                    %% caller gets an empty list of targets, and when
+                    %% the message expires and actual routing happens
+                    %% the publisher is not available any more to
+                    %% receive the collected binding keys). It does
+                    %% not make sense to use a delayed exchange for
+                    %% MQTT for non-delayed messages. Because of this
+                    %% very niche, non-realistic use case the feature
+                    %% is not supported by the delayed exchange.
+                    case rabbit_khepri:is_enabled() of
+                        true  -> topic_route(Name, Message);
+                        false -> rabbit_exchange_type_topic:route(X, Message, Opts)
+                    end;
                 Mod ->
                     Mod:route(X, Message, Opts)
             end;
         _ ->
             []
     end.
+
+topic_route(XName, Message) ->
+    lists:flatmap(
+      fun(RK) -> rabbit_delayed_message_topic_trie:match(XName, RK) end,
+      mc:routing_keys(Message)).
 
 validate(#exchange{arguments = Args} = X) ->
     case table_lookup(Args, <<"x-delayed-type">>) of
@@ -129,3 +171,18 @@ exchange_type(#exchange{arguments = Args}) ->
         {_ArgType, Type} -> Type;
         _ -> error
     end.
+
+%% Called as a boot step. Registers the Khepri topic trie projection
+%% used to route topic-mode delayed messages. Registered unconditionally:
+%% Khepri is set up by the broker regardless of whether the khepri_db
+%% feature flag is enabled, so the projection attaches to the local
+%% store and simply sees no events until khepri_db is turned on. This
+%% handles the case where khepri_db is enabled at runtime, after the
+%% plugin's boot step has already run.
+-spec register_topic_trie_projection() -> ok.
+register_topic_trie_projection() ->
+    rabbit_delayed_message_topic_trie:register_projection().
+
+-spec unregister_topic_trie_projection() -> ok.
+unregister_topic_trie_projection() ->
+    rabbit_delayed_message_topic_trie:unregister_projection().
