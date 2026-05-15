@@ -30,8 +30,9 @@ of some kind.
 
 ## Supported RabbitMQ Versions
 
-This version of the plugin requires **RabbitMQ 4.2.6 or later** (the minimum version that
-supports migration from dynamically named Mnesia tables [rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139)).
+This version of the plugin requires **RabbitMQ 4.2.6 or later**.[^min-version]
+
+[^min-version]: 4.2.6 is the earliest release that supports migration from dynamically named Mnesia tables ([rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139)).
 
 Each build of this plugin pins to a specific RabbitMQ patch version (see `RABBITMQ_VERSION` in the `Makefile`).
 
