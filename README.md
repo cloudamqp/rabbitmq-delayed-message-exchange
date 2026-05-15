@@ -203,11 +203,11 @@ The EZ file is created in the `plugins` directory.
 
 ## Creating a Release
 
-1. Update `broker_version_requirements` in `helpers.bzl` & `Makefile` (Optional)
-1. Update the plugin version in `MODULE.bazel`
-1. Push a tag (i.e. `v4.0.0`) with the matching version
-1. Allow the Release workflow to run and create a draft release
-1. Review and publish the release
+1. Update `RABBITMQ_VERSION` in `Makefile` to the target RabbitMQ release (e.g. `v4.2.6`)
+1. Update `broker_version_requirements` in the `PROJECT_APP_EXTRA_KEYS` block of `Makefile` to match
+1. Push a tag (i.e. `v4.2.6`) with the matching version
+1. The Package workflow (`.github/workflows/package.yml`) builds the `.ez` artifacts on push
+1. Attach the produced `rabbitmq_delayed_message_exchange*.ez` and `leveled*.ez` files to a GitHub release
 
 ## LICENSE
 
