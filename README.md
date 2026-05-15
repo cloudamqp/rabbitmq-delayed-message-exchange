@@ -138,11 +138,14 @@ making sure the delay is within range, ie: `Delay > 0, Delay =<
 ?ERL_MAX_T` (In Erlang a timer can be set up to (2^32)-1 milliseconds
 in the future).
 
-If the previous condition holds, then the message will be persisted to
-a Leveled LSM-tree database (or to Mnesia on clusters that have not enabled the
-`khepri_db` feature flag) and some other logic will kick in to determine if this
-particular message delay needs to replace the current scheduled timer
-and so on.
+If the previous condition holds, then the message is persisted. On clusters
+with the `khepri_db` feature flag enabled, the message body goes into a Leveled
+LSM-tree database on disk and an entry keyed by the scheduled delivery timestamp
+is inserted into an in-memory `ordered_set` ETS index that drives next-timer
+selection. On clusters still using Mnesia, both the message and its index entry
+are stored in node-local Mnesia tables. Some other logic will then kick in to
+determine if this particular message delay needs to replace the current
+scheduled timer and so on.
 
 This means that while one _could_ use this exchange in place of a
 _direct_ or _fanout_ exchange (or any other exchange for that matter),
@@ -181,9 +184,12 @@ we cannot be sure that at the future publishing point in time
  * there is at least one queue we can route to
  * the original connection is still around to send a `basic.return` to
 
-Current design of this plugin doesn't really fit scenarios
-with a high number of delayed messages (e.g. 100s of thousands or millions).
-See [#72](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/issues/72) for details.
+The Leveled-based storage lifts the worst of the previous scaling cliffs
+(see _Performance Improvements_ above), but its in-memory ETS index still holds
+one entry per scheduled message until delivery, so memory cost grows linearly
+with the number of pending messages. Workloads with very large backlogs
+(hundreds of thousands or millions of pending messages) should size node memory
+accordingly.
 
 ## Disabling the Plugin ##
 
