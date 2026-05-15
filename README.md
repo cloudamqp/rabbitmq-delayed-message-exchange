@@ -1,9 +1,13 @@
 # RabbitMQ Delayed Message Plugin
 
+This is a fork of https://github.com/rabbitmq/rabbitmq-delayed-message-exchange
+which is no longer maintained by Team RabbitMQ. The goal of this fork is to
+support newer RabbitMQ versions.
+
 This plugin adds delayed-messaging (or scheduled-messaging) to RabbitMQ.
-Its current design has **significant limitations** (documented below);
-consider using an external scheduler and a data store that fits your needs
-first.
+
+Its current design has **significant limitations** (documented below)
+consider [the alternatives on the original repo](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange#alternatives-available).
 
 If you accept the limitations, please read on.
 
@@ -144,6 +148,18 @@ This means that while one _could_ use this exchange in place of a
 _direct_ or _fanout_ exchange (or any other exchange for that matter),
 _it will be slower_ than using the actual exchange. If you don't need
 to delay messages, then use the actual exchange.
+
+
+## Performance Improvements
+
+The Leveled-based implementation introduces two notable improvements over the previous Mnesia-based storage:
+
+ * **Smaller memory footprint**: delayed messages are no longer kept in memory in their entirety.
+   Only an index is held in memory while the message bodies live in the Leveled LSM-tree on disk,
+   resulting in a considerably smaller memory footprint
+ * **Stable behavior under scheduling collisions**: with Mnesia-based storage, write and startup times
+   degraded exponentially when a large number of messages were scheduled to the exact same expiry timestamp.
+   This is no longer the case with the Leveled-based implementation
 
 
 ## Limitations
