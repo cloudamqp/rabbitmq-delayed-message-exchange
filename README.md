@@ -33,7 +33,7 @@ of some kind.
 This version of the plugin requires **RabbitMQ 4.2.6 or later** (the minimum version that
 supports migration from dynamically named Mnesia tables [rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139)).
 
-Every [release](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange) of this plugin targets one RabbitMQ release series.
+Each build of this plugin pins to a specific RabbitMQ patch version (see `RABBITMQ_VERSION` in the `Makefile`).
 
 When the `khepri_db` feature flag is enabled (the default in RabbitMQ 4.2+), delayed messages are stored
 in a [Leveled](https://github.com/martinsumner/leveled) LSM-tree database local to each node.
