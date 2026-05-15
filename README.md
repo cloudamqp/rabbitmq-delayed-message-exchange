@@ -27,7 +27,7 @@ of some kind.
 ## Supported RabbitMQ Versions
 
 This version of the plugin requires **RabbitMQ 4.2.6 or later** (the minimum version that
-backports the changes from [rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139)).
+supports migration from dynamically named Mnesia tables [rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139)).
 
 Every [release](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange) of this plugin targets one RabbitMQ release series.
 
