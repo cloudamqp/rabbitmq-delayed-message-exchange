@@ -2,7 +2,7 @@
 
 This is a fork of https://github.com/rabbitmq/rabbitmq-delayed-message-exchange
 which is no longer maintained by Team RabbitMQ. The goal of this fork is to
-support newer RabbitMQ versions.
+support newer RabbitMQ versions that are using the Khepri metadata store.
 
 This plugin adds delayed-messaging (or scheduled-messaging) to RabbitMQ.
 
@@ -53,7 +53,7 @@ The latest version of this plugin [requires Erlang 26.2 or later versions](https
 
 Binary builds are distributed [via GitHub releases](https://github.com/cloudamqp/rabbitmq-delayed-message-exchange/releases).
 
-As with all 3rd party plugins, the `.ez` files the release provides must be copied into a [node's plugins directory](https://rabbitmq.com/plugins.html#plugin-directories)
+As with all 3rd party plugins, the `.ez` files the release provides must be copied into the [node's plugins directory](https://rabbitmq.com/plugins.html#plugin-directories)
 with sufficient permissions for the effective user of the RabbitMQ process to load it from disk.
 
 To find out what the plugins directory is, use `rabbitmq-plugins directories`
@@ -64,7 +64,7 @@ rabbitmq-plugins directories -s
 
 ### Enabling the Plugin
 
-Then run the following command:
+To enable the plugin run the following command:
 
 ``` bash
 rabbitmq-plugins enable rabbitmq_delayed_message_exchange
@@ -135,13 +135,13 @@ implications if you do this.
 
 For each message that crosses an `"x-delayed-message"` exchange, the
 plugin will try to determine if the message has to be expired by
-making sure the delay is within range, ie: `Delay > 0, Delay =<
+making sure the delay is within range, i.e.: `Delay > 0, Delay =<
 ?ERL_MAX_T` (In Erlang a timer can be set up to (2^32)-1 milliseconds
 in the future).
 
 If the previous condition holds, then the message is persisted. On clusters
 with the `khepri_db` feature flag enabled, the message body goes into a Leveled
-LSM-tree database on disk and an entry keyed by the scheduled delivery timestamp
+LSM-tree database on disk, and an entry keyed by the scheduled delivery time stamp
 is inserted into an in-memory `ordered_set` ETS index that drives next-timer
 selection. On clusters still using Mnesia, both the message and its index entry
 are stored in node-local Mnesia tables. Some other logic will then kick in to
@@ -160,10 +160,10 @@ The Leveled-based implementation introduces two notable improvements over the pr
 
  * **Smaller memory footprint**: delayed messages are no longer kept in memory in their entirety.
    Only an index is held in memory while the message bodies live in the Leveled LSM-tree on disk,
-   resulting in a considerably smaller memory footprint
+   resulting in a considerably smaller memory footprint.
  * **Stable behavior under scheduling collisions**: with Mnesia-based storage, write and startup times
    degraded exponentially when a large number of messages were scheduled to the exact same expiry timestamp.
-   This is no longer the case with the Leveled-based implementation
+   This is no longer the case with the Leveled-based implementation.
 
 
 ## Limitations
@@ -187,7 +187,7 @@ we cannot be sure that at the future publishing point in time
 
 The Leveled-based storage lifts the worst of the previous scaling cliffs
 (see _Performance Improvements_ above), but its in-memory ETS index still holds
-one entry per scheduled message until delivery, so memory cost grows linearly
+one entry per scheduled message until delivery, so memory overhead grows linearly
 with the number of pending messages. Workloads with very large backlogs
 (hundreds of thousands or millions of pending messages) should size node memory
 accordingly.
