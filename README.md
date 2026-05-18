@@ -1,61 +1,13 @@
 # RabbitMQ Delayed Message Plugin
 
-## This Project is No Longer Maintained
+This is a fork of https://github.com/rabbitmq/rabbitmq-delayed-message-exchange
+which is no longer maintained by Team RabbitMQ. The goal of this fork is to
+support newer RabbitMQ versions that are using the Khepri metadata store.
 
-**Important**: Team RabbitMQ no longer maintains this project.
+This plugin adds delayed-messaging (or scheduled-messaging) to RabbitMQ.
 
-## Why?
-
-This plugin has serious limitations and is based on Mnesia, the original schema data store in RabbitMQ that
-will be removed from RabbitMQ starting with the 4.3 or 4.4 series.
-
-A [distributed design](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/issues/229) of this plugin
-required significant changes (e.g. switching from a custom exchange type to a custom queue type),
-and took a few person-years worth of R&D investment. 
-
-As this is an entirely optional feature, it was decided to ship it in the commercial edition.
-
-
-## Alternatives Available
-
-### Delayed Queues in VMware Tanzu RabbitMQ
-
-[VMware Tanzu RabbitMQ](https://www.vmware.com/products/app-platform/tanzu-rabbitmq) supports a separate queue type, [delayed queues](https://techdocs.broadcom.com/us/en/vmware-tanzu/data-solutions/tanzu-rabbitmq-ova/4-2/tanzu-rabbitmq-ova-virtual-machine/site-delayed-queues.html),
-that, unlike this plugin, offers:
-
- * Raft-based replication (same foundation and characteristics as [quorum queues](https://www.rabbitmq.com/docs/quorum-queues))
- * Ability to handle backlogs into tens or even hundreds of millions of delayed messages
-
-### Using Dead Lettering for Message Delays
-
-The combination of [Dead Lettering](https://www.rabbitmq.com/docs/dlx) and [TTL](https://www.rabbitmq.com/docs/ttl) has been widely used for
-basic delays and task retries across the RabbitMQ community.
-
-Some messaging frameworks, e.g. NServiceBus, set up the topology for such delayed retries for you.
-
-This option gives you much better visibility of what's going on with the delayed messages, an ability to purge
-the messages, and use replicated queues types for their storage.
-
-### Build Your Own Single Node Alternative
-
-If the serious limitations of this plugin are acceptable to you, the single-node nature and significant limitations of this plugin
-make it easier to reimplement without any use of Mnesia:
-
- * Target RabbitMQ 4.x where Khepri is a stable feature, enabled by default as of `4.2.0`
- * Use Khepri for metadata storage
- * Use RocksDB for storing messages
-
-
-
-## Consider the  Limitations
-
-This plugin adds delayed-messaging (or scheduled-messaging) to
-RabbitMQ. Its current design **has multiple significant limitation** (documented below),
-consider using an external scheduler and a data store that fits your needs
-first.
-
-This plugin badly needs a [new design](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/issues/229)
-and a reimplementation from the ground up.
+Its current design has **significant limitations** (documented below)
+consider [the alternatives on the original repo](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange#alternatives-available).
 
 If you accept the limitations, please read on.
 
@@ -78,32 +30,30 @@ of some kind.
 
 ## Supported RabbitMQ Versions
 
-Every [release](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange) of this plugin targest one RabbitMQ release series.
+This version of the plugin requires **RabbitMQ 4.2.6 or later**.[^min-version]
 
-This plugin can be enabled on a RabbitMQ cluster that uses either Mnesia or Khepri as [metadata store](https://www.rabbitmq.com/docs/metadata-store),
-however, when this plugin is enabled **before** Khepri, it must be restarted (or the node must be)
-after Khepri is enabled.
+[^min-version]: 4.2.6 is the earliest release that supports migration from dynamically named Mnesia tables ([rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139)).
 
-In other words, there are three possible scenarios w.r.t. the schema data store used:
+Each build of this plugin pins to a specific RabbitMQ patch version (see `RABBITMQ_VERSION` in the `Makefile`).
 
-1. If the cluster uses Mnesia for schema store, it works exactly as it did against RabbitMQ 3.13.x
-2. If the cluster uses Khepri and the plugin is enabled after Khepri, it will start Mnesia, set up a node-local Mnesia replica and schema, and works as in scenario 1
-3. **Important**: if the cluster uses Mnesia, then the plugin is enabled, and then Khepri is enabled, the plugin must be disabled and re-enabled, or the node must be restarted.
-   Then it will start Mnesia and works as in scenario 2
+When the `khepri_db` feature flag is enabled (the default in RabbitMQ 4.2+), delayed messages are stored
+in a [Leveled](https://github.com/martinsumner/leveled) LSM-tree database local to each node.
+On clusters still using Mnesia as the schema store, the plugin falls back to Mnesia for storage.
+If the `khepri_db` feature flag is enabled while the plugin is already running, existing
+Mnesia-stored delayed messages are migrated to Leveled automatically.
 
 ## Supported Erlang/OTP Versions
 
 The latest version of this plugin [requires Erlang 26.2 or later versions](https://www.rabbitmq.com/docs/which-erlang).
 
 
-
 ## Installation
 
 ### Download a Binary Build
 
-Binary builds are distributed [via GitHub releases](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases).
+Binary builds are distributed [via GitHub releases](https://github.com/cloudamqp/rabbitmq-delayed-message-exchange/releases).
 
-As with all 3rd party plugins, the `.ez` file must be copied into a [node's plugins directory](https://rabbitmq.com/plugins.html#plugin-directories)
+As with all 3rd party plugins, the `.ez` files the release provides must be copied into the [node's plugins directory](https://rabbitmq.com/plugins.html#plugin-directories)
 with sufficient permissions for the effective user of the RabbitMQ process to load it from disk.
 
 To find out what the plugins directory is, use `rabbitmq-plugins directories`
@@ -114,7 +64,7 @@ rabbitmq-plugins directories -s
 
 ### Enabling the Plugin
 
-Then run the following command:
+To enable the plugin run the following command:
 
 ``` bash
 rabbitmq-plugins enable rabbitmq_delayed_message_exchange
@@ -185,14 +135,18 @@ implications if you do this.
 
 For each message that crosses an `"x-delayed-message"` exchange, the
 plugin will try to determine if the message has to be expired by
-making sure the delay is within range, ie: `Delay > 0, Delay =<
+making sure the delay is within range, i.e.: `Delay > 0, Delay =<
 ?ERL_MAX_T` (In Erlang a timer can be set up to (2^32)-1 milliseconds
 in the future).
 
-If the previous condition holds, then the message will be persisted to
-Mnesia and some other logic will kick in to determine if this
-particular message delay needs to replace the current scheduled timer
-and so on.
+If the previous condition holds, then the message is persisted. On clusters
+with the `khepri_db` feature flag enabled, the message body goes into a Leveled
+LSM-tree database on disk, and an entry keyed by the scheduled delivery time stamp
+is inserted into an in-memory `ordered_set` ETS index that drives next-timer
+selection. On clusters still using Mnesia, both the message and its index entry
+are stored in node-local Mnesia tables. Some other logic will then kick in to
+determine if this particular message delay needs to replace the current
+scheduled timer and so on.
 
 This means that while one _could_ use this exchange in place of a
 _direct_ or _fanout_ exchange (or any other exchange for that matter),
@@ -200,29 +154,43 @@ _it will be slower_ than using the actual exchange. If you don't need
 to delay messages, then use the actual exchange.
 
 
+## Performance Improvements
+
+The Leveled-based implementation introduces two notable improvements over the previous Mnesia-based storage:
+
+ * **Smaller memory footprint**: delayed messages are no longer kept in memory in their entirety.
+   Only an index is held in memory while the message bodies live in the Leveled LSM-tree on disk,
+   resulting in a considerably smaller memory footprint.
+ * **Stable behavior under scheduling collisions**: with Mnesia-based storage, write and startup times
+   degraded exponentially when a large number of messages were scheduled to the exact same expiry timestamp.
+   This is no longer the case with the Leveled-based implementation.
+
+
 ## Limitations
 
-Delayed messages are stored in a Mnesia table (also see Limitations below)
-with a single disk replica on the current node. They will survive a node
-restart. While timer(s) that triggered scheduled delivery are not persisted,
-it will be re-initialised during plugin activation on node start.
+Delayed messages are stored in a Leveled LSM-tree database with a single copy on the current node.
+They will survive a node restart. While timer(s) that triggered scheduled delivery are not persisted,
+they will be re-initialised during plugin activation on node start.
 Obviously, only having one copy of a scheduled message in a cluster means
 that losing that node or disabling the plugin on it will lose the
 messages residing on that node.
 
 The plugin only performs one attempt at publishing each message but since publishing
 is local, in practice the only issue that may prevent delivery is the lack of queues
-(or bindings) to route to. 
+(or bindings) to route to.
 
 Closely related to the above, the mandatory flag is not supported by this exchange:
 we cannot be sure that at the future publishing point in time
 
  * there is at least one queue we can route to
  * the original connection is still around to send a `basic.return` to
- 
-Current design of this plugin doesn't really fit scenarios
-with a high number of delayed messages (e.g. 100s of thousands or millions).
-See [#72](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/issues/72) for details.
+
+The Leveled-based storage lifts the worst of the previous scaling cliffs
+(see _Performance Improvements_ above), but its in-memory ETS index still holds
+one entry per scheduled message until delivery, so memory overhead grows linearly
+with the number of pending messages. Workloads with very large backlogs
+(hundreds of thousands or millions of pending messages) should size node memory
+accordingly.
 
 ## Disabling the Plugin ##
 
@@ -233,20 +201,20 @@ HAVEN'T BEEN DELIVERED WILL BE LOST**.
 ## Building the Plugin
 
 ```shell
-PROJECT_VERSION=4.2.0-rc.1 PRODUCT_VERSION=4.2.0-rc.1 VERSION=4.2.0-rc.1 \
-    gmake dist PROJECT_VERSION=4.2.0-rc.1 PRODUCT_VERSION=4.2.0-rc.1 \
-    VERSION=4.2.0-rc.1 DIST_AS_EZS=true
+PROJECT_VERSION=4.2.6-rc.1 PRODUCT_VERSION=4.2.6-rc.1 VERSION=4.2.6-rc.1 \
+    gmake dist PROJECT_VERSION=4.2.6-rc.1 PRODUCT_VERSION=4.2.6-rc.1 \
+    VERSION=4.2.6-rc.1 DIST_AS_EZS=true
 ```
 
 The EZ file is created in the `plugins` directory.
 
 ## Creating a Release
 
-1. Update `broker_version_requirements` in `helpers.bzl` & `Makefile` (Optional)
-1. Update the plugin version in `MODULE.bazel`
-1. Push a tag (i.e. `v4.0.0`) with the matching version
-1. Allow the Release workflow to run and create a draft release
-1. Review and publish the release
+1. Update `RABBITMQ_VERSION` in `Makefile` to the target RabbitMQ release (e.g. `v4.2.6`)
+1. Update `broker_version_requirements` in the `PROJECT_APP_EXTRA_KEYS` block of `Makefile` to match
+1. Push a tag (i.e. `v4.2.6`) with the matching version
+1. The Package workflow (`.github/workflows/package.yml`) builds the `.ez` artifacts on push
+1. Attach the produced `rabbitmq_delayed_message_exchange*.ez` and `leveled*.ez` files to a GitHub release
 
 ## LICENSE
 
