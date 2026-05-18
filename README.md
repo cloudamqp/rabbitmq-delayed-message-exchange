@@ -201,9 +201,9 @@ HAVEN'T BEEN DELIVERED WILL BE LOST**.
 ## Building the Plugin
 
 ```shell
-PROJECT_VERSION=4.2.6-rc.1 PRODUCT_VERSION=4.2.6-rc.1 VERSION=4.2.6-rc.1 \
-    gmake dist PROJECT_VERSION=4.2.6-rc.1 PRODUCT_VERSION=4.2.6-rc.1 \
-    VERSION=4.2.6-rc.1 DIST_AS_EZS=true
+PROJECT_VERSION=4.2.6 PRODUCT_VERSION=4.2.6 VERSION=4.2.6 \
+    gmake dist PROJECT_VERSION=4.2.6 PRODUCT_VERSION=4.2.6 \
+    VERSION=4.2.6 DIST_AS_EZS=true
 ```
 
 The EZ file is created in the `plugins` directory.
