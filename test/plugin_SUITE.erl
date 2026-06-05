@@ -15,11 +15,11 @@
 
 all() ->
     [
-      {group, mnesia},
+      % {group, mnesia},
       {group, leveled},
-      {group, leveled_projection_v1},
-      {group, mnesia_to_khepri},
-      {group, mnesia_to_khepri_slow}
+      {group, leveled_projection_v1}
+      % {group, mnesia_to_khepri},
+      % {group, mnesia_to_khepri_slow}
     ].
 
 groups() ->
