@@ -22,4 +22,3 @@ rabbitmq_delayed_message_exchange.d
 /bazel-*
 
 /.vscode/
-flamegraphs

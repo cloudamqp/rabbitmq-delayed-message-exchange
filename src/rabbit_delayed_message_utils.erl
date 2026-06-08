@@ -10,7 +10,7 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
 
--export([get_delay/1, swap_delay_header/1]).
+-export([get_delay/1, swap_delay_header/1, append_to_atom/2]).
 
 -define(INTEGER_ARG_TYPES, [long, ubyte, short, ushort, int, uint]).
 
@@ -46,6 +46,11 @@ swap_delay_header(Delivery) ->
         _ ->
             Delivery
     end.
+
+append_to_atom(Atom, Append) when is_atom(Append) ->
+    append_to_atom(Atom, atom_to_list(Append));
+append_to_atom(Atom, Append) when is_list(Append) ->
+    list_to_atom(atom_to_list(Atom) ++ Append).
 
 try_convert_to_int(Type, Delay) ->
     case lists:member(Type, ?STRING_ARG_TYPES) of
