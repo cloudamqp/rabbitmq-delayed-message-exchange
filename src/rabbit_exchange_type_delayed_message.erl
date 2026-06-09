@@ -84,10 +84,7 @@ route(X = #exchange{name = Name},
                     %% MQTT for non-delayed messages. Because of this
                     %% very niche, non-realistic use case the feature
                     %% is not supported by the delayed exchange.
-                    case rabbit_khepri:is_enabled() of
-                        true  -> topic_route(Name, Message);
-                        false -> rabbit_exchange_type_topic:route(X, Message, Opts)
-                    end;
+                    topic_route(Name, Message);
                 Mod ->
                     Mod:route(X, Message, Opts)
             end;
