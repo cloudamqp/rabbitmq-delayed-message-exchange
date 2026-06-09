@@ -59,10 +59,10 @@
     #{desc          => "Two-table Khepri topic trie projection for "
                        "x-delayed-message exchanges",
       stability     => stable,
-      %% The v5 projection format this module copies. Implies all nodes
-      %% run RabbitMQ >= 4.3.0, whose Khepri supports multi-table
-      %% projections. Being a plugin flag, it can also only be enabled
-      %% once all nodes run a plugin version that knows it.
+      %% The v5 projection format this module copies, introduced in
+      %% RabbitMQ 4.3.1. Depending on it implies all nodes run
+      %% RabbitMQ >= 4.3.1. Being a plugin flag, it can also only be
+      %% enabled once all nodes run a plugin version that knows it.
       depends_on    => [topic_binding_projection_v5],
       callbacks     => #{enable      => {?MODULE, projection_v2_enable},
                          post_enable => {?MODULE, projection_v2_post_enable}}

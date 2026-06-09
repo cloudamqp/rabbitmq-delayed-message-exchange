@@ -30,7 +30,7 @@ of some kind.
 
 ## Supported RabbitMQ Versions
 
-This version of the plugin requires **RabbitMQ 4.3.0 or later**.
+This version of the plugin requires **RabbitMQ 4.3.1 or later**.
 
 Each build of this plugin pins to a specific RabbitMQ patch version (see `RABBITMQ_VERSION` in the `Makefile`).
 
@@ -41,6 +41,39 @@ This version of the plugin requires the `khepri_db` feature flag to be enabled
 ## Supported Erlang/OTP Versions
 
 The latest version of this plugin [requires Erlang 26.2 or later versions](https://www.rabbitmq.com/docs/which-erlang).
+
+
+## Feature Flags
+
+This plugin ships a [stable feature flag](https://www.rabbitmq.com/docs/feature-flags),
+`delayed_message_topic_projection_v2`. It selects the internal Khepri projection
+the plugin uses to route messages whose `x-delayed-type` is `topic`, once their
+delay elapses:
+
+ * when disabled, the plugin uses a single-table projection (v1)
+ * when enabled, the plugin uses a two-table projection (v2) that mirrors the
+   core broker's v5 topic trie projection
+
+The v5 topic trie projection was introduced in [RabbitMQ
+4.3.1](https://github.com/rabbitmq/rabbitmq-server/releases/tag/v4.3.1) as part
+of a routing bugfix. The flag depends on `topic_binding_projection_v5`, so it
+can only be enabled once every node runs RabbitMQ 4.3.1 or later with the
+`topic_binding_projection_v5` flag enabled.
+
+Enabling the flag does not change the plugin's routing results, only its
+internal representation.
+
+On a new cluster the flag is enabled by default once the plugin is enabled, so
+no action is needed. When upgrading from a plugin version that predates the flag,
+enable it once every node has been upgraded:
+
+``` bash
+rabbitmqctl enable_feature_flag delayed_message_topic_projection_v2
+```
+
+The migration is safe to run on a live cluster: the plugin keeps routing through
+the v1 projection while the v2 projection is registered, and only removes the v1
+projection after the flag is enabled cluster-wide.
 
 
 ## Installation
