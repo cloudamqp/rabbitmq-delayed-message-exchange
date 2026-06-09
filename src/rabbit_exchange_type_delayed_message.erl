@@ -67,10 +67,7 @@ route(X = #exchange{name = Name},
                 rabbit_exchange_type_topic ->
                     %% Under Khepri, rabbit's topic trie projection filters
                     %% on type=topic and ignores our x-delayed-message
-                    %% bindings, so we query our own projection. Under
-                    %% Mnesia, the rabbit topic trie tables are populated
-                    %% via ?EXCHANGE(X):add_binding/3 keyed by our
-                    %% exchange's name, so the stock topic route fn works.
+                    %% bindings, so we query our own projection.
                     %%
                     %% Notice that Opts are not passed in case of
                     %% Khepri. The `return_binding_keys' option is
@@ -87,10 +84,7 @@ route(X = #exchange{name = Name},
                     %% MQTT for non-delayed messages. Because of this
                     %% very niche, non-realistic use case the feature
                     %% is not supported by the delayed exchange.
-                    case rabbit_khepri:is_enabled() of
-                        true  -> topic_route(Name, Message);
-                        false -> rabbit_exchange_type_topic:route(X, Message, Opts)
-                    end;
+                    topic_route(Name, Message);
                 Mod ->
                     Mod:route(X, Message, Opts)
             end;

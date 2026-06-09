@@ -30,21 +30,50 @@ of some kind.
 
 ## Supported RabbitMQ Versions
 
-This version of the plugin requires **RabbitMQ 4.2.6 or later**.[^min-version]
-
-[^min-version]: 4.2.6 is the earliest release that supports migration from dynamically named Mnesia tables ([rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139)).
+This version of the plugin requires **RabbitMQ 4.3.1 or later**.
 
 Each build of this plugin pins to a specific RabbitMQ patch version (see `RABBITMQ_VERSION` in the `Makefile`).
 
-When the `khepri_db` feature flag is enabled (the default in RabbitMQ 4.2+), delayed messages are stored
-in a [Leveled](https://github.com/martinsumner/leveled) LSM-tree database local to each node.
-On clusters still using Mnesia as the schema store, the plugin falls back to Mnesia for storage.
-If the `khepri_db` feature flag is enabled while the plugin is already running, existing
-Mnesia-stored delayed messages are migrated to Leveled automatically.
+This version of the plugin requires the `khepri_db` feature flag to be enabled
+(the default in RabbitMQ 4.2+). Delayed messages are stored in a
+[Leveled](https://github.com/martinsumner/leveled) LSM-tree database local to each node.
 
 ## Supported Erlang/OTP Versions
 
 The latest version of this plugin [requires Erlang 26.2 or later versions](https://www.rabbitmq.com/docs/which-erlang).
+
+
+## Feature Flags
+
+This plugin ships a [stable feature flag](https://www.rabbitmq.com/docs/feature-flags),
+`delayed_message_topic_projection_v2`. It selects the internal Khepri projection
+the plugin uses to route messages whose `x-delayed-type` is `topic`, once their
+delay elapses:
+
+ * when disabled, the plugin uses a single-table projection (v1)
+ * when enabled, the plugin uses a two-table projection (v2) that mirrors the
+   core broker's v5 topic trie projection
+
+The v5 topic trie projection was introduced in [RabbitMQ
+4.3.1](https://github.com/rabbitmq/rabbitmq-server/releases/tag/v4.3.1) as part
+of a routing bugfix. The flag depends on `topic_binding_projection_v5`, so it
+can only be enabled once every node runs RabbitMQ 4.3.1 or later with the
+`topic_binding_projection_v5` flag enabled.
+
+Enabling the flag does not change the plugin's routing results, only its
+internal representation.
+
+On a new cluster the flag is enabled by default once the plugin is enabled, so
+no action is needed. When upgrading from a plugin version that predates the flag,
+enable it once every node has been upgraded:
+
+``` bash
+rabbitmqctl enable_feature_flag delayed_message_topic_projection_v2
+```
+
+The migration is safe to run on a live cluster: the plugin keeps routing through
+the v1 projection while the v2 projection is registered, and only removes the v1
+projection after the flag is enabled cluster-wide.
 
 
 ## Installation
@@ -139,14 +168,11 @@ making sure the delay is within range, i.e.: `Delay > 0, Delay =<
 ?ERL_MAX_T` (In Erlang a timer can be set up to (2^32)-1 milliseconds
 in the future).
 
-If the previous condition holds, then the message is persisted. On clusters
-with the `khepri_db` feature flag enabled, the message body goes into a Leveled
-LSM-tree database on disk, and an entry keyed by the scheduled delivery time stamp
-is inserted into an in-memory `ordered_set` ETS index that drives next-timer
-selection. On clusters still using Mnesia, both the message and its index entry
-are stored in node-local Mnesia tables. Some other logic will then kick in to
-determine if this particular message delay needs to replace the current
-scheduled timer and so on.
+If the previous condition holds, then the message is persisted. The message body
+goes into a Leveled LSM-tree database on disk, and an entry keyed by the scheduled
+delivery time stamp is inserted into an in-memory `ordered_set` ETS index that drives
+next-timer selection. Some other logic will then kick in to determine if this
+particular message delay needs to replace the current scheduled timer and so on.
 
 This means that while one _could_ use this exchange in place of a
 _direct_ or _fanout_ exchange (or any other exchange for that matter),
@@ -154,16 +180,15 @@ _it will be slower_ than using the actual exchange. If you don't need
 to delay messages, then use the actual exchange.
 
 
-## Performance Improvements
+## Storage Characteristics
 
-The Leveled-based implementation introduces two notable improvements over the previous Mnesia-based storage:
+The Leveled-based storage has two notable characteristics:
 
- * **Smaller memory footprint**: delayed messages are no longer kept in memory in their entirety.
+ * **Smaller memory footprint**: delayed messages are not kept in memory in their entirety.
    Only an index is held in memory while the message bodies live in the Leveled LSM-tree on disk,
    resulting in a considerably smaller memory footprint.
- * **Stable behavior under scheduling collisions**: with Mnesia-based storage, write and startup times
-   degraded exponentially when a large number of messages were scheduled to the exact same expiry timestamp.
-   This is no longer the case with the Leveled-based implementation.
+ * **Stable behavior under scheduling collisions**: write and startup times remain stable even when
+   a large number of messages are scheduled to the exact same expiry timestamp.
 
 
 ## Limitations
@@ -185,10 +210,9 @@ we cannot be sure that at the future publishing point in time
  * there is at least one queue we can route to
  * the original connection is still around to send a `basic.return` to
 
-The Leveled-based storage lifts the worst of the previous scaling cliffs
-(see _Performance Improvements_ above), but its in-memory ETS index still holds
-one entry per scheduled message until delivery, so memory overhead grows linearly
-with the number of pending messages. Workloads with very large backlogs
+The Leveled-based storage keeps message bodies on disk (see _Storage Characteristics_ above),
+but its in-memory ETS index still holds one entry per scheduled message until delivery,
+so memory overhead grows linearly with the number of pending messages. Workloads with very large backlogs
 (hundreds of thousands or millions of pending messages) should size node memory
 accordingly.
 
@@ -201,18 +225,18 @@ HAVEN'T BEEN DELIVERED WILL BE LOST**.
 ## Building the Plugin
 
 ```shell
-PROJECT_VERSION=4.2.6 PRODUCT_VERSION=4.2.6 VERSION=4.2.6 \
-    gmake dist PROJECT_VERSION=4.2.6 PRODUCT_VERSION=4.2.6 \
-    VERSION=4.2.6 DIST_AS_EZS=true
+PROJECT_VERSION=4.3.1 PRODUCT_VERSION=4.3.1 VERSION=4.3.1 \
+    gmake dist PROJECT_VERSION=4.3.1 PRODUCT_VERSION=4.3.1 \
+    VERSION=4.3.1 DIST_AS_EZS=true
 ```
 
 The EZ file is created in the `plugins` directory.
 
 ## Creating a Release
 
-1. Update `RABBITMQ_VERSION` in `Makefile` to the target RabbitMQ release (e.g. `v4.2.6`)
+1. Update `RABBITMQ_VERSION` in `Makefile` to the target RabbitMQ release (e.g. `v4.3.1`)
 1. Update `broker_version_requirements` in the `PROJECT_APP_EXTRA_KEYS` block of `Makefile` to match
-1. Push a tag (i.e. `v4.2.6`) with the matching version
+1. Push a tag (i.e. `v4.3.1`) with the matching version
 1. The Package workflow (`.github/workflows/package.yml`) builds the `.ez` artifacts on push
 1. Attach the produced `rabbitmq_delayed_message_exchange*.ez` and `leveled*.ez` files to a GitHub release
 

@@ -17,8 +17,8 @@
 -export([start_link/0,
          disable_plugin/0,
          delay_message/3,
-         messages_delayed/1,
-         await_khepri_and_setup/0]).
+         messages_delayed/1
+        ]).
 
 %% Gen server exports
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
@@ -41,10 +41,7 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 disable_plugin() ->
-    rabbit_khepri:handle_fallback(
-      #{mnesia => fun() -> rabbit_delayed_message_mnesia:disable_plugin() end,
-        khepri => fun() -> rabbit_delayed_message_leveled:disable_plugin() end}
-     ).
+    rabbit_delayed_message_leveled:disable_plugin().
 
 -spec delay_message(rabbit_types:exchange(),
                     mc:state(),
@@ -55,16 +52,10 @@ delay_message(Exchange, Message, Delay) ->
                     infinity).
 
 messages_delayed(Exchange) ->
-    rabbit_khepri:handle_fallback(
-      #{mnesia => fun() -> rabbit_delayed_message_mnesia:messages_delayed(Exchange) end,
-        khepri => fun() -> rabbit_delayed_message_leveled:messages_delayed(Exchange) end}
-     ).
+    rabbit_delayed_message_leveled:messages_delayed(Exchange).
 
 refresh_config() ->
     gen_server:call(?MODULE, refresh_config).
-
-await_khepri_and_setup() ->
-    gen_server:cast(?MODULE, await_khepri_and_setup).
 
 %%--------------------------------------------------------------------
 init([]) ->
@@ -88,8 +79,6 @@ handle_call(refresh_config, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
-handle_cast(await_khepri_and_setup, State) ->
-    {noreply, maybe_switch_to_leveled(State)};
 handle_cast(_C, State) ->
     {noreply, State}.
 
@@ -133,28 +122,16 @@ code_change(_, State, _) -> {ok, State}.
 
 %%--------------------------------------------------------------------
 get_many(Key) ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:get_many(Key) end,
-              khepri => fun() -> rabbit_delayed_message_leveled:get_many(Key) end}
-        ).
+    rabbit_delayed_message_leveled:get_many(Key).
 
 delete(Key) ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:delete(Key) end,
-              khepri => fun() -> rabbit_delayed_message_leveled:delete(Key) end}
-        ).
+    rabbit_delayed_message_leveled:delete(Key).
 
 get_first_delay() ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:get_first_delay() end,
-              khepri => fun() -> rabbit_delayed_message_leveled:get_first_delay() end}
-        ).
+    rabbit_delayed_message_leveled:get_first_delay().
 
 delete_empty_key(Key) ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:delete_empty_key(Key) end,
-              khepri => fun() -> rabbit_delayed_message_leveled:delete_empty_key(Key) end}
-        ).
+    rabbit_delayed_message_leveled:delete_empty_key(Key).
 
 maybe_delay_first() ->
     case get_first_delay() of
@@ -214,27 +191,13 @@ internal_delay_message(CurrTimer, Exchange, Message, Delay) ->
 %% Key will be used upon message receipt to fetch
 %% the deliveries from the database
 store_delayed(DelayTS, Exchange, Message) ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() ->
-                            rabbit_delayed_message_mnesia:store_delay(DelayTS,
-                                                                      Exchange,
-                                                                      Message)
-                        end,
-              khepri => fun() ->
-                            rabbit_delayed_message_leveled:store_delay(DelayTS,
-                                                                       Exchange,
-                                                                       Message)
-                        end}
-        ).
+    rabbit_delayed_message_leveled:store_delay(DelayTS, Exchange, Message).
 
 start_timer(Delay, Key) ->
     erlang:start_timer(erlang:max(0, Delay), self(), {deliver, Key}).
 
 setup() ->
-    rabbit_khepri:handle_fallback(
-            #{mnesia => fun() -> rabbit_delayed_message_mnesia:setup() end,
-              khepri => fun() -> rabbit_delayed_message_leveled:setup() end}
-        ).
+    rabbit_delayed_message_leveled:setup().
 
 recover() ->
     %% topology recovery has already happened, we have to recover state for any durable
@@ -306,22 +269,3 @@ bump_routed_stats(ExName, Qs, State) ->
 
 refresh_config(State) ->
     rabbit_event:init_stats_timer(State, #state.stats_state).
-
-%% Called after the mnesia-to-leveled migration has written data to disk.
-%% is_enabled/1 uses blocking mode: it waits for the feature flag to stabilise
-%% before returning, so no polling loop is needed.
-maybe_switch_to_leveled(State = #state{timer = CurrTimer}) ->
-    case rabbit_feature_flags:is_enabled(khepri_db, blocking) of
-        true ->
-            case CurrTimer of
-                not_set -> ok;
-                _       -> erlang:cancel_timer(CurrTimer)
-            end,
-            setup(),
-            State#state{timer = maybe_delay_first()};
-        false ->
-            rabbit_log:warning("Delayed message exchange: "
-                             "khepri_db feature flag is not enabled, "
-                             "delayed messages will continue to be stored in Mnesia"),
-            State
-    end.

@@ -15,24 +15,21 @@
 
 all() ->
     [
-      {group, mnesia},
       {group, leveled},
-      {group, mnesia_to_khepri},
-      {group, mnesia_to_khepri_slow}
+      {group, leveled_projection_v1}
     ].
 
 groups() ->
     [
-      {mnesia, [], [{group, non_parallel_tests}, {group, fine_stats}]},
       {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}, {group, leveled_only}]},
       {leveled_only, [], [disable_cleanup]},
-      {mnesia_to_khepri, [], [mnesia_to_khepri_migration]},
-      {mnesia_to_khepri_slow, [], [mnesia_to_khepri_migration_slow]},
+      {leveled_projection_v1, [], [topic_projection_v1_to_v2_migration]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
                                 routing_topic,
                                 routing_topic_unbind_stops_routing,
+                                routing_topic_empty_binding_key_isolated,
                                 routing_direct,
                                 routing_fanout,
                                 e2e_nodelay,
@@ -63,46 +60,34 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     Config.
 
-init_per_group(mnesia, Config) ->
-    Config1 = rabbit_ct_helpers:set_config(
-        Config,
-        [
-            {metadata_store, mnesia},
-            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-mnesia")},
-            {tcp_ports_base, 21000}
-        ]
-    ),
-    run_broker_and_clients(Config1);
 init_per_group(leveled, Config) ->
     Config1 = rabbit_ct_helpers:set_config(
         Config,
         [
             {metadata_store, khepri},
-            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-leveled")},
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-leveled")},
             {tcp_ports_base, 21100}
         ]
     ),
     run_broker_and_clients(Config1);
-init_per_group(mnesia_to_khepri, Config) ->
+init_per_group(leveled_projection_v1, Config) ->
     Config1 = rabbit_ct_helpers:set_config(
         Config,
         [
-            {metadata_store, mnesia},
-            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k")},
-            {tcp_ports_base, 21200}
+            {metadata_store, khepri},
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-proj-v1")},
+            {tcp_ports_base, 21400}
         ]
     ),
-    run_broker_and_clients(Config1);
-init_per_group(mnesia_to_khepri_slow, Config) ->
-    Config1 = rabbit_ct_helpers:set_config(
-        Config,
-        [
-            {metadata_store, mnesia},
-            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k-slow")},
-            {tcp_ports_base, 21300}
-        ]
-    ),
-    run_broker_and_clients(Config1);
+    %% Boot with all stable feature flags except
+    %% delayed_message_topic_projection_v2, so the node starts on the v1
+    %% projection and the test can exercise the migration to v2.
+    Config2 = rabbit_ct_helpers:merge_app_env(
+                Config1,
+                {rabbit,
+                 [{forced_feature_flags_on_init,
+                   {rel, [], [delayed_message_topic_projection_v2]}}]}),
+    run_broker_and_clients(Config2);
 init_per_group(fine_stats, Config) ->
     CollectStatsOrig = get_collect_stats(Config),
     set_collect_stats(Config, fine),
@@ -111,13 +96,9 @@ init_per_group(fine_stats, Config) ->
 init_per_group(_, Config) ->
     Config.
 
-end_per_group(mnesia, Config) ->
-    teardown_broker_and_clients(Config);
 end_per_group(leveled, Config) ->
     teardown_broker_and_clients(Config);
-end_per_group(mnesia_to_khepri, Config) ->
-    teardown_broker_and_clients(Config);
-end_per_group(mnesia_to_khepri_slow, Config) ->
+end_per_group(leveled_projection_v1, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
@@ -128,7 +109,13 @@ end_per_group(_, Config) ->
     Config.
 
 run_broker_and_clients(Config) ->
-    rabbit_ct_helpers:run_setup_steps(Config,
+    %% The suite declares transient non-exclusive queues, which are
+    %% deprecated and denied by default since RabbitMQ 4.3.
+    Config1 = rabbit_ct_helpers:merge_app_env(
+                Config,
+                {rabbit, [{permit_deprecated_features,
+                           #{transient_nonexcl_queues => true}}]}),
+    rabbit_ct_helpers:run_setup_steps(Config1,
       rabbit_ct_broker_helpers:setup_steps() ++
       rabbit_ct_client_helpers:setup_steps()).
 
@@ -178,13 +165,17 @@ routing_topic(Config) ->
 
 %% Regression: disabling the plugin must run the cleanup boot steps.
 %% Two pieces of state need to be released:
-%%   * the Khepri topic trie projection and its ETS table
-%%     (rabbit_delayed_message_topic_trie)
+%%   * the Khepri topic trie projection and its ETS tables
+%%     (rabbit_delayed_message_topic_trie_v2 and
+%%     rabbit_delayed_message_topic_binding_v2)
 %%   * the Leveled delayed-message store (its in-memory key index ETS
 %%     table and the on-disk bookie directory)
 %% Re-enabling must restore both.
 disable_cleanup(Config) ->
-    Trie = rabbit_delayed_message_topic_trie,
+    %% CT nodes boot with all stable feature flags enabled, so the
+    %% delayed_message_topic_projection_v2 tables are the ones in use.
+    TrieTabs = [rabbit_delayed_message_topic_trie_v2,
+                rabbit_delayed_message_topic_binding_v2],
     LeveledIndex = rabbit_delayed_message_leveled_key_index,
     EtsWhereis = fun(T) ->
         rabbit_ct_broker_helpers:rpc(Config, 0, ets, whereis, [T])
@@ -217,9 +208,9 @@ disable_cleanup(Config) ->
     publish_messages(Chan, Ex, <<"a.b.c">>, [60000]),
     amqp_channel:wait_for_confirms_or_die(Chan),
 
-    %% Pre-conditions: both the projection table and the Leveled state
+    %% Pre-conditions: both the projection tables and the Leveled state
     %% (index ETS and on-disk journal files) exist.
-    ?assertNotEqual(undefined, EtsWhereis(Trie)),
+    [?assertNotEqual(undefined, EtsWhereis(T)) || T <- TrieTabs],
     ?assertNotEqual(undefined, EtsWhereis(LeveledIndex)),
     ?assert(JournalFileCount() > 0),
 
@@ -233,7 +224,7 @@ disable_cleanup(Config) ->
     %% the bookie's on-disk data).
     ok = rabbit_ct_broker_helpers:disable_plugin(
            Config, 0, rabbitmq_delayed_message_exchange),
-    ?awaitMatch(undefined, EtsWhereis(Trie), 5000),
+    [?awaitMatch(undefined, EtsWhereis(T), 5000) || T <- TrieTabs],
     ?awaitMatch(undefined, EtsWhereis(LeveledIndex), 5000),
     ?awaitMatch(0, JournalFileCount(), 5000),
 
@@ -242,7 +233,8 @@ disable_cleanup(Config) ->
     %% fresh by setup/0.
     ok = rabbit_ct_broker_helpers:enable_plugin(
            Config, 0, rabbitmq_delayed_message_exchange),
-    ?awaitMatch(T when T =/= undefined, EtsWhereis(Trie), 5000),
+    [?awaitMatch(T when T =/= undefined, EtsWhereis(Tab), 5000)
+     || Tab <- TrieTabs],
     ?awaitMatch(T when T =/= undefined, EtsWhereis(LeveledIndex), 10000),
     ok.
 
@@ -276,6 +268,117 @@ routing_topic_unbind_stops_routing(Config) ->
     #'queue.declare_ok'{message_count = C2} =
         amqp_channel:call(Chan, make_queue(Q)),
     ?assertEqual(0, C2),
+    ok.
+
+%% Regression for the equivalent of rabbitmq/rabbitmq-server#16271: with
+%% exchange-scoped trie roots, an empty binding key on one exchange must
+%% not capture messages published with an empty routing key to a
+%% different exchange.
+routing_topic_empty_binding_key_isolated(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+    Ex1 = make_exchange_name(Config, "1"),
+    Ex2 = make_exchange_name(Config, "2"),
+    Q = make_queue_name(Config, "1"),
+    setup_fabric(Chan, make_exchange(Ex1, <<"topic">>), make_queue(Q), <<>>),
+    declare_exchange(Chan, make_exchange(Ex2, <<"topic">>)),
+    amqp_channel:call(Chan, #'confirm.select'{}),
+
+    %% An empty routing key published to the unbound exchange must not
+    %% cross-route to the queue bound to the other exchange.
+    publish_messages(Chan, Ex2, <<>>, [0]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    #'queue.declare_ok'{message_count = C1} =
+        amqp_channel:call(Chan, make_queue(Q)),
+    ?assertEqual(0, C1),
+
+    %% The same publish to the bound exchange routes.
+    publish_messages(Chan, Ex1, <<>>, [0]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    #'queue.declare_ok'{message_count = C2} =
+        amqp_channel:call(Chan, make_queue(Q)),
+    ?assertEqual(1, C2),
+
+    %% Unbinding the empty key stops routing. Zero words means the root
+    %% is also the leaf, so the trie GC has no edges to prune.
+    #'queue.unbind_ok'{} =
+        amqp_channel:call(Chan, #'queue.unbind'{queue = Q,
+                                                exchange = Ex1,
+                                                routing_key = <<>>}),
+    publish_messages(Chan, Ex1, <<>>, [0]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    #'queue.declare_ok'{message_count = C3} =
+        amqp_channel:call(Chan, make_queue(Q)),
+    ?assertEqual(1, C3),
+
+    amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex1}),
+    amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex2}),
+    amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+%% The node boots with the delayed_message_topic_projection_v2 feature
+%% flag disabled (see init_per_group/2), so topic routing starts on the
+%% v1 single-table projection. Enabling the flag at runtime must migrate
+%% routing to the v2 tables via the enable/post_enable callbacks without
+%% breaking bindings created before the migration.
+topic_projection_v1_to_v2_migration(Config) ->
+    FFlag = delayed_message_topic_projection_v2,
+    TrieV1 = rabbit_delayed_message_topic_trie,
+    TrieTabsV2 = [rabbit_delayed_message_topic_trie_v2,
+                  rabbit_delayed_message_topic_binding_v2],
+    EtsWhereis = fun(T) ->
+        rabbit_ct_broker_helpers:rpc(Config, 0, ets, whereis, [T])
+    end,
+
+    %% Pre-conditions: only the v1 projection is registered.
+    ?assertNot(rabbit_ct_broker_helpers:is_feature_flag_enabled(
+                 Config, FFlag)),
+    ?assertNotEqual(undefined, EtsWhereis(TrieV1)),
+    [?assertEqual(undefined, EtsWhereis(T)) || T <- TrieTabsV2],
+
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+    BK = <<"a.*.c">>,
+    setup_fabric(Chan, make_exchange(Ex, <<"topic">>), make_queue(Q), BK),
+    amqp_channel:call(Chan, #'confirm.select'{}),
+
+    %% Routing works on the v1 path.
+    publish_messages(Chan, Ex, <<"a.b.c">>, [0]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    #'queue.declare_ok'{message_count = C1} =
+        amqp_channel:call(Chan, make_queue(Q)),
+    ?assertEqual(1, C1),
+
+    %% Enabling the flag registers the v2 projection (backfilled from
+    %% the Khepri store contents) and unregisters the v1 one.
+    ok = rabbit_ct_broker_helpers:enable_feature_flag(Config, FFlag),
+    [?awaitMatch(T when T =/= undefined, EtsWhereis(Tab), 5000)
+     || Tab <- TrieTabsV2],
+    ?awaitMatch(undefined, EtsWhereis(TrieV1), 5000),
+
+    %% The binding created before the migration still routes, now via
+    %% the v2 tables.
+    publish_messages(Chan, Ex, <<"a.z.c">>, [0]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    #'queue.declare_ok'{message_count = C2} =
+        amqp_channel:call(Chan, make_queue(Q)),
+    ?assertEqual(2, C2),
+
+    %% Unbinding after the migration stops routing.
+    #'queue.unbind_ok'{} =
+        amqp_channel:call(Chan, #'queue.unbind'{queue = Q,
+                                                exchange = Ex,
+                                                routing_key = BK}),
+    publish_messages(Chan, Ex, <<"a.b.c">>, [0]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    #'queue.declare_ok'{message_count = C3} =
+        amqp_channel:call(Chan, make_queue(Q)),
+    ?assertEqual(2, C3),
+
+    amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan),
     ok.
 
 routing_direct(Config) ->
@@ -546,136 +649,6 @@ string_delay_header(Config) ->
     Sorted = lists:sort(Msgs),
     ?assertEqual(Sorted, Result),
 
-    ok.
-
-mnesia_to_khepri_migration(Config) ->
-    Chan = rabbit_ct_client_helpers:open_channel(Config),
-
-    Ex = make_exchange_name(Config, "1"),
-    Q = make_queue_name(Config, "1"),
-
-    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
-                 make_durable_queue(Q)),
-
-    %% Use publisher confirms to ensure messages are persisted in Mnesia
-    %% before triggering the migration.
-    amqp_channel:call(Chan, #'confirm.select'{}),
-
-    %% Publish messages with a delay long enough to survive the migration
-    %% and node restart regardless of how quickly those steps complete.
-    Msgs = [30000, 30000, 30000],
-    publish_messages(Chan, Ex, Msgs),
-    amqp_channel:wait_for_confirms_or_die(Chan),
-
-    %% Enable khepri_db, which runs the Mnesia-to-Leveled migration for the
-    %% delayed-message tables via rabbit_delayed_message_m2k_converter.
-    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
-
-    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
-
-    {ok, Result} = consume(Chan2, Q, Msgs),
-    Sorted = lists:sort(Msgs),
-    ?assertEqual(Sorted, Result),
-
-    ?assertEqual(undefined,
-                 rabbit_ct_broker_helpers:rpc(Config, 0,
-                     rabbit_delayed_message_leveled, get_first_delay, [])),
-    ?assertEqual([],
-                 rabbit_ct_broker_helpers:rpc(Config, 0,
-                     rabbit_delayed_message_leveled, list_all_keys, [])),
-
-    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
-    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
-    rabbit_ct_client_helpers:close_channel(Chan2),
-    ok.
-
-%% Exercises the race where the rabbit_delayed_message gen-server processes the
-%% await_khepri_and_setup cast while khepri_db is still state_changing (i.e.
-%% copy_to_khepri is still running). The test slows down each copy_to_khepri
-%% call by 1 s, giving the gen-server plenty of time to receive and process the
-%% cast before migration finishes. Two invariants are checked:
-%%
-%%   1. The leveled ETS index does NOT exist while copy_to_khepri runs —
-%%      proving setup() is correctly gated on is_enabled(khepri_db, blocking).
-%%
-%%   2. After enable/1 returns, the ETS index has one entry per delayed message —
-%%      proving init_index() ran after all records were in leveled.
-%%
-%% If setup() were called unconditionally (or with a non-blocking is_enabled
-%% that returned false during state_changing and bypassed setup entirely),
-%% invariant 1 or 2 would be violated and the test would fail.
-mnesia_to_khepri_migration_slow(Config) ->
-    Chan = rabbit_ct_client_helpers:open_channel(Config),
-
-    Ex = make_exchange_name(Config, "1"),
-    Q = make_queue_name(Config, "1"),
-
-    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
-                 make_durable_queue(Q)),
-
-    amqp_channel:call(Chan, #'confirm.select'{}),
-
-    MsgCount = 3,
-    %% 10 s delay: messages stay pending throughout the ~MsgCount-second migration.
-    Msgs = lists:duplicate(MsgCount, 10000),
-    publish_messages(Chan, Ex, Msgs),
-    amqp_channel:wait_for_confirms_or_die(Chan),
-
-    %% plugin_SUITE is not in the broker node's code path, so any lambda that
-    %% carries a plugin_SUITE module reference crashes with {undef,...} when
-    %% executed there. Load the beam explicitly before spawning.
-    SuiteBeamFile = code:which(plugin_SUITE),
-    {ok, SuiteBeam} = file:read_file(SuiteBeamFile),
-    {module, plugin_SUITE} = rabbit_ct_broker_helpers:rpc(Config, 0, code, load_binary,
-             [plugin_SUITE, SuiteBeamFile, SuiteBeam]),
-
-    TestPid = self(),
-    MockOwnerPid = rabbit_ct_broker_helpers:rpc(Config, 0, erlang, spawn,
-        [fun() ->
-            ok = meck:new(rabbit_delayed_message_m2k_converter, [passthrough]),
-            %% Sleep 1 s per record so the gen-server must block for several
-            %% seconds inside is_enabled(khepri_db, blocking). During those
-            %% sleeps the ETS index must not yet exist (invariant 1).
-            ok = meck:expect(rabbit_delayed_message_m2k_converter, copy_to_khepri,
-                fun(Table, Record, State) ->
-                    case ets:whereis(rabbit_delayed_message_leveled_key_index) of
-                        undefined -> ok;
-                        _         -> TestPid ! setup_called_too_early
-                    end,
-                    Res = meck:passthrough([Table, Record, State]),
-                    timer:sleep(3000),
-                    Res
-                end),
-            TestPid ! meck_ready,
-            receive stop -> meck:unload(rabbit_delayed_message_m2k_converter) end
-        end]),
-    receive
-        meck_ready -> ok
-    after 5000 ->
-        error(meck_owner_did_not_start)
-    end,
-    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
-
-    MockOwnerPid ! stop,
-
-    %% Invariant 1: setup() must not have fired during copy_to_khepri.
-    receive
-        setup_called_too_early -> error(setup_called_too_early)
-    after 0 -> ok
-    end,
-    timer:sleep(30000),
-
-    % Invariant 2: every delayed message must be in the ETS index.
-    % - Not checking Invariant 2 here, too complex -
-
-    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
-
-    {ok, Result} = consume(Chan2, Q, Msgs),
-    ?assertEqual(lists:sort(Msgs), Result),
-
-    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
-    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
-    rabbit_ct_client_helpers:close_channel(Chan2),
     ok.
 
 setup_fabric(Chan, ExDeclare, QueueDeclare) ->

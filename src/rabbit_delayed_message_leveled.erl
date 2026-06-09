@@ -31,9 +31,6 @@
          start_opts/1
         ]).
 
-%% Internal exports for use by rabbit_delayed_message_m2k_converter
--export([start_db/0, internal_put/3]).
-
 % --------------------------------------------
 % Storage
 % --------------------------------------------
