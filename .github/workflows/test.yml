@@ -17,15 +17,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - erlang_version: "26"
-          elixir_version: "1.17.x"
-          rabbitmq_version: "v4.3.1"
         - erlang_version: "27"
           elixir_version: "1.18.x"
-          rabbitmq_version: "v4.3.1"
+          rabbitmq_version: "v4.3.4"
         - erlang_version: "28"
           elixir_version: "1.19.x"
-          rabbitmq_version: "v4.3.1"
+          rabbitmq_version: "v4.3.4"
+        - erlang_version: "29"
+          elixir_version: "1.20.x"
+          rabbitmq_version: "v4.3.4"
 
     steps:
       - name: Checkout RabbitMQ Server

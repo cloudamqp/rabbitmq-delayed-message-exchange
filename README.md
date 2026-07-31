@@ -30,7 +30,7 @@ of some kind.
 
 ## Supported RabbitMQ Versions
 
-This version of the plugin requires **RabbitMQ 4.3.1 or later**.
+This version of the plugin requires **RabbitMQ 4.3.4 or later**.
 
 Each build of this plugin pins to a specific RabbitMQ patch version (see `RABBITMQ_VERSION` in the `Makefile`).
 
@@ -225,9 +225,9 @@ HAVEN'T BEEN DELIVERED WILL BE LOST**.
 ## Building the Plugin
 
 ```shell
-PROJECT_VERSION=4.3.1 PRODUCT_VERSION=4.3.1 VERSION=4.3.1 \
-    gmake dist PROJECT_VERSION=4.3.1 PRODUCT_VERSION=4.3.1 \
-    VERSION=4.3.1 DIST_AS_EZS=true
+PROJECT_VERSION=4.3.4 PRODUCT_VERSION=4.3.4 VERSION=4.3.4 \
+    gmake dist PROJECT_VERSION=4.3.4 PRODUCT_VERSION=4.3.4 \
+    VERSION=4.3.4 DIST_AS_EZS=true
 ```
 
 The EZ file is created in the `plugins` directory.
