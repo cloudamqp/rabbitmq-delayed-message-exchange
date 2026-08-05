@@ -2,11 +2,11 @@ PROJECT = rabbitmq_delayed_message_exchange
 PROJECT_DESCRIPTION = RabbitMQ Delayed Message Exchange
 PROJECT_MOD = rabbit_delayed_message_app
 
-RABBITMQ_VERSION ?= v4.3.1
+RABBITMQ_VERSION ?= v4.3.3
 current_rmq_ref = $(RABBITMQ_VERSION)
 
 define PROJECT_APP_EXTRA_KEYS
-	{broker_version_requirements, ["4.3.0"]}
+	{broker_version_requirements, ["4.3.3"]}
 endef
 
 dep_amqp_client                = git_rmq-subfolder rabbitmq-erlang-client $(RABBITMQ_VERSION)
