@@ -2,7 +2,7 @@ PROJECT = rabbitmq_delayed_message_exchange
 PROJECT_DESCRIPTION = RabbitMQ Delayed Message Exchange
 PROJECT_MOD = rabbit_delayed_message_app
 
-RABBITMQ_VERSION ?= v4.3.4
+RABBITMQ_VERSION ?= v4.3.3
 current_rmq_ref = $(RABBITMQ_VERSION)
 
 define PROJECT_APP_EXTRA_KEYS

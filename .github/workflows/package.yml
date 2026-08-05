@@ -32,7 +32,7 @@ jobs:
         with:
           repository: rabbitmq/rabbitmq-server
           path: ${{ env.SERVER_FOLDER }}
-          ref: v4.3.4
+          ref: v4.3.3
 
       - name: Fetch and build RabbitMQ dependencies
         working-directory: ${{ env.SERVER_FOLDER }}
