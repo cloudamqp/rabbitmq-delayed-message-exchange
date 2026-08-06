@@ -12,6 +12,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
+-include_lib("prometheus/include/prometheus_model.hrl").
 
 all() ->
     [
@@ -36,6 +37,8 @@ groups() ->
                                 e2e_delay,
                                 delay_order,
                                 delayed_messages_count,
+                                prometheus_delayed_messages_per_exchange,
+                                prometheus_delayed_messages_vhost_filter,
                                 counter_survives_restart,
                                 node_restart_before_delay_expires,
                                 node_restart_after_delay_expires,
@@ -541,6 +544,72 @@ delayed_messages_count(Config) ->
     rabbit_ct_client_helpers:close_channel(Chan),
     ok.
 
+prometheus_delayed_messages_per_exchange(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex1 = make_exchange_name(Config, "1"),
+    Q1 = make_queue_name(Config, "1"),
+    Ex2 = make_exchange_name(Config, "2"),
+    Q2 = make_queue_name(Config, "2"),
+    %% A plain exchange must not be reported by the collector.
+    PlainEx = make_exchange_name(Config, "plain"),
+    PlainQ = make_queue_name(Config, "plain"),
+
+    setup_fabric(Chan, make_exchange(Ex1, <<"direct">>), make_queue(Q1)),
+    setup_fabric(Chan, make_exchange(Ex2, <<"direct">>), make_queue(Q2)),
+    setup_fabric(Chan,
+                 #'exchange.declare'{exchange = PlainEx, type = <<"direct">>},
+                 make_queue(PlainQ)),
+
+    Msgs1 = [5000, 5000, 5000],
+    Msgs2 = [5000, 5000],
+    publish_messages(Chan, Ex1, Msgs1),
+    publish_messages(Chan, Ex2, Msgs2),
+    publish_messages(Chan, PlainEx, [5000]),
+
+    %% Publishing is asynchronous, so the counts settle shortly after.
+    ?awaitMatch(3, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex1), 3000),
+    ?awaitMatch(2, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex2), 3000),
+    %% A plain exchange never delays messages, so it is never reported.
+    ?assertEqual(undefined,
+                 delayed_count(per_exchange_metrics(Config, all), <<"/">>, PlainEx)),
+
+    assert_metric_family(Config, Ex1, 3),
+
+    consume(Chan, Q1, Msgs1),
+    consume(Chan, Q2, Msgs2),
+
+    ?awaitMatch(0, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex1), 5000),
+    ?awaitMatch(0, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex2), 5000),
+
+    delete_exchange(Chan, Ex1),
+    delete_exchange(Chan, Ex2),
+    delete_exchange(Chan, PlainEx),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+prometheus_delayed_messages_vhost_filter(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_exchange(Ex, <<"direct">>), make_queue(Q)),
+
+    Msgs = [5000, 5000],
+    publish_messages(Chan, Ex, Msgs),
+
+    ?awaitMatch(2, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex), 3000),
+    ?assertEqual(2, delayed_count(per_exchange_metrics(Config, [<<"/">>]), <<"/">>, Ex)),
+    %% Filtering on another vhost hides every series.
+    ?assertEqual([], per_exchange_metrics(Config, [<<"other">>])),
+
+    consume(Chan, Q, Msgs),
+
+    delete_exchange(Chan, Ex),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
 counter_survives_restart(Config) ->
     Chan = rabbit_ct_client_helpers:open_channel(Config),
 
@@ -763,6 +832,69 @@ make_queue_name(Config, Suffix) ->
 make_policy_name(Config, Suffix) ->
     B = rabbit_ct_helpers:get_config(Config, test_resource_name),
     erlang:list_to_binary("p-" ++ B ++ "-" ++ Suffix).
+
+delete_exchange(Chan, Ex) ->
+    #'exchange.delete_ok'{} =
+        amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex}).
+
+per_exchange_metrics(Config, VHostsFilter) ->
+    rabbit_ct_broker_helpers:rpc(Config, 0,
+                                 rabbit_delayed_message_prometheus,
+                                 per_exchange_delayed_messages,
+                                 [VHostsFilter]).
+
+delayed_count(Metrics, VHost, Ex) ->
+    case lists:keyfind([{vhost, VHost}, {exchange, Ex}], 1, Metrics) of
+        {_Labels, Count} -> Count;
+        false            -> undefined
+    end.
+
+assert_metric_family(Config, Ex, Expected) ->
+    case collect_metric_families(Config, [delayed_messages_by_exchange]) of
+        unavailable ->
+            ct:log("The prometheus application is unavailable on the node, "
+                   "skipping MetricFamily assertions");
+        [MF] ->
+            ?assertEqual(<<"rabbitmq_detailed_delayed_messages">>,
+                         MF#'MetricFamily'.name),
+            ?assertEqual('GAUGE', MF#'MetricFamily'.type),
+            ExLabel = #'LabelPair'{name = <<"exchange">>, value = Ex},
+            ?assert(lists:any(
+                      fun(#'Metric'{label = Labels,
+                                    gauge = #'Gauge'{value = Value}}) ->
+                              Value =:= Expected andalso
+                                  lists:member(ExLabel, Labels)
+                      end,
+                      MF#'MetricFamily'.metric)),
+            %% Nothing is collected unless the metric family is requested
+            %% explicitly, i.e. with the `family' query parameter.
+            ?assertEqual([], collect_metric_families(Config, [])),
+            ?assertEqual([], collect_metric_families(Config, [queue_coarse_metrics]))
+    end.
+
+collect_metric_families(Config, Families) ->
+    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, collect_metric_families,
+                                 [Families]).
+
+%% Runs on the broker node. The collector reads its filters from the process
+%% dictionary, exactly like rabbit_prometheus_handler sets them up, so they
+%% must be set in the very process that calls collect_mf/2.
+collect_metric_families(Families) ->
+    case code:ensure_loaded(prometheus_model_helpers) of
+        {module, _} ->
+            put(prometheus_mf_filter, Families),
+            put(collected_metric_families, []),
+            Callback = fun(MF) ->
+                           put(collected_metric_families,
+                               [MF | get(collected_metric_families)])
+                       end,
+            ok = rabbit_delayed_message_prometheus:collect_mf(detailed, Callback),
+            MFs = lists:reverse(erase(collected_metric_families)),
+            erase(prometheus_mf_filter),
+            MFs;
+        _ ->
+            unavailable
+    end.
 
 get_publish_out_stat(Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, ets, tab2list, [channel_queue_exchange_metrics]).

@@ -193,6 +193,42 @@ The Leveled-based storage has two notable characteristics:
    a large number of messages are scheduled to the exact same expiry timestamp.
 
 
+## Prometheus Metrics
+
+When the [`rabbitmq_prometheus`](https://www.rabbitmq.com/docs/prometheus) plugin is enabled,
+this plugin exposes the number of messages currently delayed by each `x-delayed-message` exchange:
+
+```
+rabbitmq_detailed_delayed_messages{vhost="/",exchange="my-exchange"} 42
+```
+
+The metric is only served by the [detailed endpoint](https://www.rabbitmq.com/docs/prometheus#detailed-endpoint)
+and, like every other detailed metric, it must be requested explicitly with the `family` query parameter:
+
+```
+GET /metrics/detailed?family=delayed_messages_by_exchange
+```
+
+The `vhost` query parameter is honoured as well, so a scrape can be limited to a subset of virtual hosts:
+
+```
+GET /metrics/detailed?family=delayed_messages_by_exchange&vhost=my-vhost
+```
+
+The metric is reported per exchange only. Per-virtual-host and cluster-wide numbers have to be
+aggregated from it at query time.
+
+Delayed messages are stored by the node that accepted the publish, so the reported values are
+node-local: a cluster-wide total aggregates the values reported by every node.
+
+The plugin does not depend on `rabbitmq_prometheus`: when that plugin is not enabled, no metrics
+are exported. The collector is registered when this plugin starts, so if `rabbitmq_prometheus`
+is enabled *afterwards*, register it without restarting this plugin with:
+
+```sh
+rabbitmqctl eval 'rabbit_delayed_message_prometheus:ensure_registered().'
+```
+
 ## Limitations
 
 Delayed messages are stored in a Leveled LSM-tree database with a single copy on the current node.
