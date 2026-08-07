@@ -18,7 +18,7 @@
 -export([deregister_cleanup/1,
          collect_mf/2]).
 
--export([per_exchange_delayed_messages/1]).
+-export([per_exchange_delayed/1]).
 
 -type labels() :: [{atom(), atom() | binary()}].
 
@@ -109,14 +109,18 @@ vhosts_filter_from_pdict() ->
       VHostsFilter :: ordsets:ordset(binary()) | all,
       Resp :: [{atom(), [{labels(), integer()}]}].
 prometheus_format(?METRIC_FAMILY_DELAYED_MESSAGES, VHostsFilter) ->
-    [{delayed_messages, per_exchange_delayed_messages(VHostsFilter)}].
+    {Messages, Bytes} = per_exchange_delayed(VHostsFilter),
+    [{delayed_messages, Messages},
+     {delayed_message_bytes, Bytes}].
 
 %% Delayed messages are stored by the node that accepted the publish, so the
-%% counts reported here only cover this node.
--spec per_exchange_delayed_messages(VHostsFilter) -> Resp when
+%% counts reported here only cover this node. Both metrics come from the same
+%% walk over the exchanges, so a scrape lists them once rather than per metric.
+-spec per_exchange_delayed(VHostsFilter) -> {Messages, Bytes} when
       VHostsFilter :: ordsets:ordset(binary()) | all,
-      Resp :: [{labels(), integer()}].
-per_exchange_delayed_messages(VHostsFilter) ->
+      Messages :: [{labels(), integer()}],
+      Bytes :: [{labels(), integer()}].
+per_exchange_delayed(VHostsFilter) ->
     lists:foldl(
       fun(#resource{virtual_host = VHost} = XName, Acc) ->
               case is_vhost_enabled(VHost, VHostsFilter) of
@@ -126,14 +130,15 @@ per_exchange_delayed_messages(VHostsFilter) ->
                       Acc
               end
       end,
-      [],
+      {[], []},
       rabbit_exchange:list_names()).
 
-delayed_messages(#resource{name = Name} = XName, VHost, Acc) ->
+delayed_messages(#resource{name = Name} = XName, VHost, {Messages, Bytes} = Acc) ->
     case rabbit_exchange:lookup(XName) of
         {ok, #exchange{type = ?EXCHANGE_TYPE} = X} ->
-            Count = rabbit_delayed_message:messages_delayed(X),
-            [{[{vhost, VHost}, {exchange, Name}], Count} | Acc];
+            Labels = [{vhost, VHost}, {exchange, Name}],
+            {[{Labels, rabbit_delayed_message:messages_delayed(X)} | Messages],
+             [{Labels, rabbit_delayed_message:bytes_delayed(X)} | Bytes]};
         _ ->
             Acc
     end.
@@ -144,4 +149,7 @@ is_vhost_enabled(VHost, VHostsFilter) ->
     ordsets:is_element(VHost, VHostsFilter).
 
 help_for_metric_name(delayed_messages) ->
-    "Number of messages delayed by an x-delayed-message exchange on this node".
+    "Number of messages delayed by an x-delayed-message exchange on this node";
+help_for_metric_name(delayed_message_bytes) ->
+    "Size in bytes of the message bodies delayed by an x-delayed-message "
+    "exchange on this node".
