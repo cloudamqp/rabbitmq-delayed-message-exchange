@@ -850,7 +850,7 @@ delayed_count(Metrics, VHost, Ex) ->
     end.
 
 assert_metric_family(Config, Ex, Expected) ->
-    case collect_metric_families(Config, [delayed_messages_by_exchange]) of
+    case collect_metric_families(Config, [delayed_exchange_metrics]) of
         unavailable ->
             ct:log("The prometheus application is unavailable on the node, "
                    "skipping MetricFamily assertions");

@@ -206,13 +206,13 @@ The metric is only served by the [detailed endpoint](https://www.rabbitmq.com/do
 and, like every other detailed metric, it must be requested explicitly with the `family` query parameter:
 
 ```
-GET /metrics/detailed?family=delayed_messages_by_exchange
+GET /metrics/detailed?family=delayed_exchange_metrics
 ```
 
 The `vhost` query parameter is honoured as well, so a scrape can be limited to a subset of virtual hosts:
 
 ```
-GET /metrics/detailed?family=delayed_messages_by_exchange&vhost=my-vhost
+GET /metrics/detailed?family=delayed_exchange_metrics&vhost=my-vhost
 ```
 
 The metric is reported per exchange only. Per-virtual-host and cluster-wide numbers have to be

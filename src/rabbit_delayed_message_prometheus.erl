@@ -26,7 +26,7 @@
 
 -define(METRIC_NAME_PREFIX, "rabbitmq_detailed_").
 
--define(METRIC_FAMILY_DELAYED_MESSAGES, delayed_messages_by_exchange).
+-define(METRIC_FAMILY_DELAYED_MESSAGES, delayed_exchange_metrics).
 
 -define(METRIC_FAMILIES, [
     {?METRIC_FAMILY_DELAYED_MESSAGES, gauge}
