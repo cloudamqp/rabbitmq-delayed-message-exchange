@@ -17,7 +17,8 @@
 -export([start_link/0,
          disable_plugin/0,
          delay_message/3,
-         messages_delayed/1
+         messages_delayed/1,
+         bytes_delayed/1
         ]).
 
 %% Gen server exports
@@ -53,6 +54,9 @@ delay_message(Exchange, Message, Delay) ->
 
 messages_delayed(Exchange) ->
     rabbit_delayed_message_leveled:messages_delayed(Exchange).
+
+bytes_delayed(Exchange) ->
+    rabbit_delayed_message_leveled:bytes_delayed(Exchange).
 
 refresh_config() ->
     gen_server:call(?MODULE, refresh_config).

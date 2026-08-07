@@ -568,19 +568,27 @@ prometheus_delayed_messages_per_exchange(Config) ->
     publish_messages(Chan, PlainEx, [5000]),
 
     %% Publishing is asynchronous, so the counts settle shortly after.
-    ?awaitMatch(3, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex1), 3000),
-    ?awaitMatch(2, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex2), 3000),
+    ?awaitMatch(3, delayed_count(Config, <<"/">>, Ex1), 3000),
+    ?awaitMatch(2, delayed_count(Config, <<"/">>, Ex2), 3000),
     %% A plain exchange never delays messages, so it is never reported.
-    ?assertEqual(undefined,
-                 delayed_count(per_exchange_metrics(Config, all), <<"/">>, PlainEx)),
+    ?assertEqual(undefined, delayed_count(Config, <<"/">>, PlainEx)),
 
-    assert_metric_family(Config, Ex1, 3),
+    %% The payload of every published message is term_to_binary(Delay).
+    PayloadSize = byte_size(term_to_binary(5000)),
+    ?assertEqual(3 * PayloadSize, delayed_bytes(Config, <<"/">>, Ex1)),
+    ?assertEqual(2 * PayloadSize, delayed_bytes(Config, <<"/">>, Ex2)),
+    ?assertEqual(undefined, delayed_bytes(Config, <<"/">>, PlainEx)),
+
+    assert_metric_family(Config, Ex1, 3, 3 * PayloadSize),
 
     consume(Chan, Q1, Msgs1),
     consume(Chan, Q2, Msgs2),
 
-    ?awaitMatch(0, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex1), 5000),
-    ?awaitMatch(0, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex2), 5000),
+    ?awaitMatch(0, delayed_count(Config, <<"/">>, Ex1), 5000),
+    ?awaitMatch(0, delayed_count(Config, <<"/">>, Ex2), 5000),
+    %% Draining an exchange releases its bytes as well.
+    ?assertEqual(0, delayed_bytes(Config, <<"/">>, Ex1)),
+    ?assertEqual(0, delayed_bytes(Config, <<"/">>, Ex2)),
 
     delete_exchange(Chan, Ex1),
     delete_exchange(Chan, Ex2),
@@ -599,10 +607,11 @@ prometheus_delayed_messages_vhost_filter(Config) ->
     Msgs = [5000, 5000],
     publish_messages(Chan, Ex, Msgs),
 
-    ?awaitMatch(2, delayed_count(per_exchange_metrics(Config, all), <<"/">>, Ex), 3000),
-    ?assertEqual(2, delayed_count(per_exchange_metrics(Config, [<<"/">>]), <<"/">>, Ex)),
+    ?awaitMatch(2, delayed_count(Config, <<"/">>, Ex), 3000),
+    {Messages, _Bytes} = per_exchange_metrics(Config, [<<"/">>]),
+    ?assertEqual(2, metric_value(Messages, <<"/">>, Ex)),
     %% Filtering on another vhost hides every series.
-    ?assertEqual([], per_exchange_metrics(Config, [<<"other">>])),
+    ?assertEqual({[], []}, per_exchange_metrics(Config, [<<"other">>])),
 
     consume(Chan, Q, Msgs),
 
@@ -638,6 +647,11 @@ counter_survives_restart(Config) ->
                     rabbit_exchange, info_all, [<<"/">>]),
     [Exchange] = lists:filter(FilterEx, Exchanges),
     {messages_delayed, MsgCount} = proplists:lookup(messages_delayed, Exchange),
+
+    %% The byte counter is rebuilt from the payload size kept in the Leveled
+    %% ledger head, so it has to survive the restart along with the count.
+    ?assertEqual(MsgCount * byte_size(term_to_binary(30000)),
+                 delayed_bytes(Config, <<"/">>, Ex)),
 
     {ok, _} = consume(Chan2, Q, Msgs),
     amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
@@ -840,37 +854,48 @@ delete_exchange(Chan, Ex) ->
 per_exchange_metrics(Config, VHostsFilter) ->
     rabbit_ct_broker_helpers:rpc(Config, 0,
                                  rabbit_delayed_message_prometheus,
-                                 per_exchange_delayed_messages,
+                                 per_exchange_delayed,
                                  [VHostsFilter]).
 
-delayed_count(Metrics, VHost, Ex) ->
+delayed_count(Config, VHost, Ex) ->
+    {Messages, _Bytes} = per_exchange_metrics(Config, all),
+    metric_value(Messages, VHost, Ex).
+
+delayed_bytes(Config, VHost, Ex) ->
+    {_Messages, Bytes} = per_exchange_metrics(Config, all),
+    metric_value(Bytes, VHost, Ex).
+
+metric_value(Metrics, VHost, Ex) ->
     case lists:keyfind([{vhost, VHost}, {exchange, Ex}], 1, Metrics) of
-        {_Labels, Count} -> Count;
+        {_Labels, Value} -> Value;
         false            -> undefined
     end.
 
-assert_metric_family(Config, Ex, Expected) ->
+assert_metric_family(Config, Ex, ExpectedCount, ExpectedBytes) ->
     case collect_metric_families(Config, [delayed_exchange_metrics]) of
         unavailable ->
             ct:log("The prometheus application is unavailable on the node, "
                    "skipping MetricFamily assertions");
-        [MF] ->
-            ?assertEqual(<<"rabbitmq_detailed_delayed_messages">>,
-                         MF#'MetricFamily'.name),
-            ?assertEqual('GAUGE', MF#'MetricFamily'.type),
-            ExLabel = #'LabelPair'{name = <<"exchange">>, value = Ex},
-            ?assert(lists:any(
-                      fun(#'Metric'{label = Labels,
-                                    gauge = #'Gauge'{value = Value}}) ->
-                              Value =:= Expected andalso
-                                  lists:member(ExLabel, Labels)
-                      end,
-                      MF#'MetricFamily'.metric)),
+        [CountMF, BytesMF] ->
+            assert_metric(CountMF, <<"rabbitmq_detailed_delayed_messages">>,
+                          Ex, ExpectedCount),
+            assert_metric(BytesMF, <<"rabbitmq_detailed_delayed_message_bytes">>,
+                          Ex, ExpectedBytes),
             %% Nothing is collected unless the metric family is requested
             %% explicitly, i.e. with the `family' query parameter.
             ?assertEqual([], collect_metric_families(Config, [])),
             ?assertEqual([], collect_metric_families(Config, [queue_coarse_metrics]))
     end.
+
+assert_metric(MF, Name, Ex, Expected) ->
+    ?assertEqual(Name, MF#'MetricFamily'.name),
+    ?assertEqual('GAUGE', MF#'MetricFamily'.type),
+    ExLabel = #'LabelPair'{name = <<"exchange">>, value = Ex},
+    ?assert(lists:any(
+              fun(#'Metric'{label = Labels, gauge = #'Gauge'{value = Value}}) ->
+                      Value =:= Expected andalso lists:member(ExLabel, Labels)
+              end,
+              MF#'MetricFamily'.metric)).
 
 collect_metric_families(Config, Families) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, collect_metric_families,

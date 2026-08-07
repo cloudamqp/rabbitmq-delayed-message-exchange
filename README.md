@@ -196,11 +196,16 @@ The Leveled-based storage has two notable characteristics:
 ## Prometheus Metrics
 
 When the [`rabbitmq_prometheus`](https://www.rabbitmq.com/docs/prometheus) plugin is enabled,
-this plugin exposes the number of messages currently delayed by each `x-delayed-message` exchange:
+this plugin exposes, for each `x-delayed-message` exchange, the number of messages currently
+delayed and the size of their bodies:
 
 ```
 rabbitmq_detailed_delayed_messages{vhost="/",exchange="my-exchange"} 42
+rabbitmq_detailed_delayed_message_bytes{vhost="/",exchange="my-exchange"} 6144
 ```
+
+`rabbitmq_detailed_delayed_message_bytes` counts message bodies only, the same way the broker's
+own `message_bytes` metrics do, so it excludes per-message metadata and storage overhead.
 
 The metric is only served by the [detailed endpoint](https://www.rabbitmq.com/docs/prometheus#detailed-endpoint)
 and, like every other detailed metric, it must be requested explicitly with the `family` query parameter:
@@ -215,8 +220,8 @@ The `vhost` query parameter is honoured as well, so a scrape can be limited to a
 GET /metrics/detailed?family=delayed_exchange_metrics&vhost=my-vhost
 ```
 
-The metric is reported per exchange only. Per-virtual-host and cluster-wide numbers have to be
-aggregated from it at query time.
+Both metrics are reported per exchange only. Per-virtual-host and cluster-wide numbers have to be
+aggregated from them at query time.
 
 Delayed messages are stored by the node that accepted the publish, so the reported values are
 node-local: a cluster-wide total aggregates the values reported by every node.
