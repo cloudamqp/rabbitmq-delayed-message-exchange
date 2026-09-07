@@ -9,8 +9,6 @@
 
 -behaviour(prometheus_collector).
 
--include_lib("rabbit_common/include/rabbit.hrl").
-
 -export([register_collector/0,
          deregister_collector/0,
          ensure_registered/0]).
@@ -18,21 +16,11 @@
 -export([deregister_cleanup/1,
          collect_mf/2]).
 
--export([per_exchange_delayed/1]).
-
--type labels() :: [{atom(), atom() | binary()}].
-
 -define(REGISTRY, 'detailed').
 
 -define(METRIC_NAME_PREFIX, "rabbitmq_detailed_").
 
--define(METRIC_FAMILY_DELAYED_MESSAGES, delayed_exchange_metrics).
-
--define(METRIC_FAMILIES, [
-    {?METRIC_FAMILY_DELAYED_MESSAGES, gauge}
-]).
-
--define(EXCHANGE_TYPE, 'x-delayed-message').
+-define(METRIC_FAMILY, delayed_exchange_metrics).
 
 register_collector() ->
     {ok, _} = application:ensure_all_started(prometheus),
@@ -59,30 +47,31 @@ ensure_registered() ->
 deregister_cleanup(_) -> ok.
 
 collect_mf(_Registry, Callback) ->
-    MFamilies = requested_families(),
-    VHostsFilter = vhosts_filter_from_pdict(),
-    [do_collect_mf(Family, VHostsFilter, Callback, Type)
-     || {Family, Type} <- ?METRIC_FAMILIES,
-        lists:member(Family, MFamilies)],
-    ok.
-
-do_collect_mf(Family, VHostsFilter, Callback, Type = gauge) ->
-    _ = lists:foreach(
-          fun({Name, Values}) ->
-            Callback(
-                prometheus_model_helpers:create_mf(
-                    <<?METRIC_NAME_PREFIX, (atom_to_binary(Name, utf8))/binary>>,
-                    help_for_metric_name(Name),
-                    Type,
-                    Values))
-          end,
-          prometheus_format(Family, VHostsFilter)
-         ).
-
+    case lists:member(?METRIC_FAMILY, requested_families()) of
+        true ->
+            collect_delayed_exchange_metrics(Callback);
+        false ->
+            ok
+    end.
 
 %% ===================================================================
 %% Private functions
 %% ===================================================================
+
+%% Delayed messages are stored by the node that accepted the publish, so the
+%% counters reported here only cover this node.
+collect_delayed_exchange_metrics(Callback) ->
+    maps:foreach(
+      fun(Name, #{type := Type, help := Help, values := Values}) ->
+              Callback(
+                prometheus_model_helpers:create_mf(
+                  <<?METRIC_NAME_PREFIX,
+                    (prometheus_model_helpers:metric_name(Name))/binary>>,
+                  Help,
+                  Type,
+                  Values))
+      end,
+      rabbit_delayed_message_counters:format(vhosts_filter_from_pdict())).
 
 %% Retrieves URL query param values from the process dictionary
 -spec requested_families() -> [atom()].
@@ -94,62 +83,14 @@ requested_families() ->
             MFamilies
     end.
 
-%% Adapted from `prometheus_rabbitmq_core_metrics_collector:vhosts_filter_from_pdict/1'.
--spec vhosts_filter_from_pdict() -> ordsets:ordset(binary()) | all.
+%% Adapted from `prometheus_rabbitmq_raft_metrics_collector:collect_detailed_metrics/2'.
+-spec vhosts_filter_from_pdict() -> fun((seshat:labels_map()) -> boolean()).
 vhosts_filter_from_pdict() ->
     case get(prometheus_vhost_filter) of
         undefined ->
-            all;
-        L ->
-            ordsets:from_list(L)
+            fun(_) -> true end;
+        VHosts ->
+            fun(#{vhost := VHost}) -> lists:member(VHost, VHosts);
+               (_) -> false
+            end
     end.
-
--spec prometheus_format(MetricFamily, VHostsFilter) -> Resp when
-      MetricFamily :: atom(),
-      VHostsFilter :: ordsets:ordset(binary()) | all,
-      Resp :: [{atom(), [{labels(), integer()}]}].
-prometheus_format(?METRIC_FAMILY_DELAYED_MESSAGES, VHostsFilter) ->
-    {Messages, Bytes} = per_exchange_delayed(VHostsFilter),
-    [{delayed_messages, Messages},
-     {delayed_message_bytes, Bytes}].
-
-%% Delayed messages are stored by the node that accepted the publish, so the
-%% counts reported here only cover this node. Both metrics come from the same
-%% walk over the exchanges, so a scrape lists them once rather than per metric.
--spec per_exchange_delayed(VHostsFilter) -> {Messages, Bytes} when
-      VHostsFilter :: ordsets:ordset(binary()) | all,
-      Messages :: [{labels(), integer()}],
-      Bytes :: [{labels(), integer()}].
-per_exchange_delayed(VHostsFilter) ->
-    lists:foldl(
-      fun(#resource{virtual_host = VHost} = XName, Acc) ->
-              case is_vhost_enabled(VHost, VHostsFilter) of
-                  true ->
-                      delayed_messages(XName, VHost, Acc);
-                  false ->
-                      Acc
-              end
-      end,
-      {[], []},
-      rabbit_exchange:list_names()).
-
-delayed_messages(#resource{name = Name} = XName, VHost, {Messages, Bytes} = Acc) ->
-    case rabbit_exchange:lookup(XName) of
-        {ok, #exchange{type = ?EXCHANGE_TYPE} = X} ->
-            Labels = [{vhost, VHost}, {exchange, Name}],
-            {[{Labels, rabbit_delayed_message:messages_delayed(X)} | Messages],
-             [{Labels, rabbit_delayed_message:bytes_delayed(X)} | Bytes]};
-        _ ->
-            Acc
-    end.
-
-is_vhost_enabled(_VHost, all) ->
-    true;
-is_vhost_enabled(VHost, VHostsFilter) ->
-    ordsets:is_element(VHost, VHostsFilter).
-
-help_for_metric_name(delayed_messages) ->
-    "Number of messages delayed by an x-delayed-message exchange on this node";
-help_for_metric_name(delayed_message_bytes) ->
-    "Size in bytes of the message bodies delayed by an x-delayed-message "
-    "exchange on this node".
