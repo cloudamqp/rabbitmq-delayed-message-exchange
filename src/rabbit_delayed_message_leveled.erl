@@ -20,22 +20,14 @@
 %% so that deleting an entry can decrease the byte counter without a disk read.
 -define(INDEX_TABLE, rabbit_delayed_message_leveled_key_index).
 
-%% Indexes into the per-exchange atomics array.
--define(COUNTER_MESSAGES, 1).
--define(COUNTER_BYTES, 2).
--define(COUNTER_SIZE, 2).
-
 -export([setup/0,
          disable_plugin/0,
-         messages_delayed/1,
-         bytes_delayed/1,
          store_delay/3,
          get_first_delay/0,
          get_many/1,
          delete/1,
          delete_empty_key/1,
          list_all_keys/0,
-         exchange_to_counter_bin/1,
          start_opts/1
         ]).
 
@@ -61,7 +53,7 @@ start_opts(Path) ->
                          % counters from the ledger heads alone, without reading
                          % the journal.
                          {{0, Size,
-                           {exchange_to_counter_bin(Exchange),
+                           {rabbit_delayed_message_counters:id(Exchange),
                             payload_size(Msg)}}, []}
                  end,
     [{root_path, Path},
@@ -82,21 +74,17 @@ setup() ->
     %% one bookie at this path at a time. Errors are swallowed; the data is safe
     %% on disk via the leveled journal and will be recovered by book_start/1.
     catch leveled_bookie:book_close(?BOOKIE),
+    ok = rabbit_delayed_message_counters:setup(),
     start_db(),
     init_index_and_counters().
 
 disable_plugin() ->
     catch ets:delete(?INDEX_TABLE),
+    catch rabbit_delayed_message_counters:teardown(),
     leveled_bookie:book_destroy(?BOOKIE).
 
-messages_delayed(Exchange) ->
-    counter_value(exchange_to_counter_bin(Exchange), ?COUNTER_MESSAGES).
-
-bytes_delayed(Exchange) ->
-    counter_value(exchange_to_counter_bin(Exchange), ?COUNTER_BYTES).
-
 store_delay(DelayTS, Exchange, Message) ->
-    ExNameBin = exchange_to_counter_bin(Exchange),
+    ExNameBin = rabbit_delayed_message_counters:id(Exchange),
     Key = make_key(DelayTS),
     Bytes = payload_size(Message),
     ets:insert(?INDEX_TABLE, {{DelayTS, Key}, ExNameBin, Bytes}),
@@ -104,7 +92,7 @@ store_delay(DelayTS, Exchange, Message) ->
         ok    -> ok;
         pause -> int_store_pause()
     end,
-    increase_counters(ExNameBin, Bytes).
+    rabbit_delayed_message_counters:add(ExNameBin, Bytes).
 
 internal_put(Key, Exchange, Message) ->
     leveled_bookie:book_put(?BOOKIE, ?BUCKET, Key,
@@ -150,7 +138,8 @@ delete({_DelayTS, LeveledKey} = IndexKey) ->
             %% hardcodes ?STD_TAG
             leveled_bookie:book_put(?BOOKIE, ?BUCKET, LeveledKey, delete, [], ?DELAYED_MSG_TAG),
             case ets:take(?INDEX_TABLE, IndexKey) of
-                [{_, ExNameBin, Bytes}] -> decrease_counters(ExNameBin, Bytes);
+                [{_, ExNameBin, Bytes}] ->
+                    rabbit_delayed_message_counters:sub(ExNameBin, Bytes);
                 [] -> ok
             end
     end.
@@ -160,61 +149,6 @@ delete_empty_key(IndexKey) ->
 
 make_key(DelayTS) ->
     <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.
-
-exchange_to_counter_bin(#exchange{name = #resource{virtual_host = VHost, name = Name}}) ->
-    VHostLen = byte_size(VHost),
-    <<VHostLen:16/big, VHost/binary, Name/binary>>.
-
-counter_bin_to_exchange_name(<<VHostLen:16/big, VHost:VHostLen/binary, Name/binary>>) ->
-    #resource{virtual_host = VHost, kind = exchange, name = Name}.
-
-% --------------------------------------------
-% Counters
-% --------------------------------------------
-
-counter_key(ExNameBin) ->
-    {?MODULE, counter, ExNameBin}.
-
-counter_value(ExNameBin, Index) ->
-    case persistent_term:get(counter_key(ExNameBin), undefined) of
-        undefined -> 0;
-        Atomic ->
-            atomics:get(Atomic, Index)
-    end.
-
-increase_counters(ExNameBin, Bytes) ->
-    Counter = ensure_counters(ExNameBin),
-    atomics:add(Counter, ?COUNTER_MESSAGES, 1),
-    atomics:add(Counter, ?COUNTER_BYTES, Bytes).
-
-%% Only ever called from the rabbit_delayed_message gen_server, so the
-%% read-then-create sequence has a single writer.
-ensure_counters(ExNameBin) ->
-    case persistent_term:get(counter_key(ExNameBin), undefined) of
-        undefined ->
-            Counter = new_counters(),
-            persistent_term:put(counter_key(ExNameBin), Counter),
-            Counter;
-        Counter ->
-            Counter
-    end.
-
-new_counters() ->
-    atomics:new(?COUNTER_SIZE, [{signed, true}]).
-
-decrease_counters(ExNameBin, Bytes) ->
-    case persistent_term:get(counter_key(ExNameBin), undefined) of
-        undefined ->
-            rabbit_log:warning("delayed message counter not found for exchange ~tp while trying to decrease", [counter_bin_to_exchange_name(ExNameBin)]);
-        Counter ->
-            case atomics:get(Counter, ?COUNTER_MESSAGES) of
-                0 ->
-                    rabbit_log:warning("delayed message counter already zero for exchange ~tp and we tried to decrease", [counter_bin_to_exchange_name(ExNameBin)]);
-                _ ->
-                    atomics:sub(Counter, ?COUNTER_MESSAGES, 1),
-                    atomics:sub(Counter, ?COUNTER_BYTES, Bytes)
-            end
-    end.
 
 %% The stored value is an `mc:state()'. Rebuilding the ledger from the journal
 %% re-runs the metadata extraction over historical objects, which may predate the
@@ -258,10 +192,7 @@ init_index_and_counters() ->
         false),
     DelayedPerExchange = Runner(),
     maps:foreach(fun(ExNameBin, {Count, Bytes}) ->
-                      Atomic = new_counters(),
-                      atomics:put(Atomic, ?COUNTER_MESSAGES, Count),
-                      atomics:put(Atomic, ?COUNTER_BYTES, Bytes),
-                      persistent_term:put(counter_key(ExNameBin), Atomic)
+                      rabbit_delayed_message_counters:init(ExNameBin, Count, Bytes)
               end, DelayedPerExchange).
 
 %% Entries written before the byte counter was introduced hold only the exchange

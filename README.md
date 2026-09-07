@@ -200,8 +200,8 @@ this plugin exposes, for each `x-delayed-message` exchange, the number of messag
 delayed and the size of their bodies:
 
 ```
-rabbitmq_detailed_delayed_messages{vhost="/",exchange="my-exchange"} 42
-rabbitmq_detailed_delayed_message_bytes{vhost="/",exchange="my-exchange"} 6144
+rabbitmq_detailed_delayed_messages{exchange="my-exchange",vhost="/"} 42.0
+rabbitmq_detailed_delayed_message_bytes{exchange="my-exchange",vhost="/"} 6144.0
 ```
 
 `rabbitmq_detailed_delayed_message_bytes` counts message bodies only, the same way the broker's
@@ -225,6 +225,10 @@ aggregated from them at query time.
 
 Delayed messages are stored by the node that accepted the publish, so the reported values are
 node-local: a cluster-wide total aggregates the values reported by every node.
+
+An exchange gets its series on a node once it delays its first message there, and loses them when
+it is deleted. Messages an exchange had already delayed stay on disk until they expire, but they
+are then routed to nowhere, so no metric is reported for them.
 
 The plugin does not depend on `rabbitmq_prometheus`: when that plugin is not enabled, no metrics
 are exported. The collector is registered when this plugin starts, so if `rabbitmq_prometheus`

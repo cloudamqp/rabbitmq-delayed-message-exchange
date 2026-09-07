@@ -19,7 +19,7 @@ dep_leveled                = git https://github.com/martinsumner/leveled.git dev
 # plugin. leveled is configured to use no compression, so neither NIF is needed
 # at runtime. They are still fetched transitively by leveled for compilation
 # but must not be started as OTP applications.
-DEPS = rabbit_common rabbit leveled
+DEPS = rabbit_common rabbit leveled seshat
 # prometheus is a build-only dependency: the collector module is compiled
 # against it, but the plugin does not require rabbitmq_prometheus to be enabled.
 BUILD_DEPS = prometheus
