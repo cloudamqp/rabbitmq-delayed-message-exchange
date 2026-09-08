@@ -12,6 +12,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
+-include_lib("prometheus/include/prometheus_model.hrl").
 
 all() ->
     [
@@ -36,6 +37,9 @@ groups() ->
                                 e2e_delay,
                                 delay_order,
                                 delayed_messages_count,
+                                prometheus_delayed_messages_per_exchange,
+                                prometheus_delayed_messages_vhost_filter,
+                                counters_removed_on_exchange_delete,
                                 counter_survives_restart,
                                 node_restart_before_delay_expires,
                                 node_restart_after_delay_expires,
@@ -196,6 +200,14 @@ disable_cleanup(Config) ->
             {error, enoent} -> 0
         end
     end,
+    %% The seshat group holding the per-exchange counters. Its table is
+    %% anonymous, so it is reached through the term seshat registers for it.
+    CountersGroup = fun() ->
+        rabbit_ct_broker_helpers:rpc(
+          Config, 0, persistent_term, get,
+          [{seshat_counters_server, rabbitmq_delayed_message_exchange},
+           undefined])
+    end,
 
     Chan = rabbit_ct_client_helpers:open_channel(Config),
     Ex = make_exchange_name(Config, "1"),
@@ -212,6 +224,7 @@ disable_cleanup(Config) ->
     %% (index ETS and on-disk journal files) exist.
     [?assertNotEqual(undefined, EtsWhereis(T)) || T <- TrieTabs],
     ?assertNotEqual(undefined, EtsWhereis(LeveledIndex)),
+    ?assertNotEqual(undefined, CountersGroup()),
     ?assert(JournalFileCount() > 0),
 
     amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex}),
@@ -226,6 +239,7 @@ disable_cleanup(Config) ->
            Config, 0, rabbitmq_delayed_message_exchange),
     [?awaitMatch(undefined, EtsWhereis(T), 5000) || T <- TrieTabs],
     ?awaitMatch(undefined, EtsWhereis(LeveledIndex), 5000),
+    ?awaitMatch(undefined, CountersGroup(), 5000),
     ?awaitMatch(0, JournalFileCount(), 5000),
 
     %% Re-enable: both pieces of state come back. Registration is
@@ -236,6 +250,7 @@ disable_cleanup(Config) ->
     [?awaitMatch(T when T =/= undefined, EtsWhereis(Tab), 5000)
      || Tab <- TrieTabs],
     ?awaitMatch(T when T =/= undefined, EtsWhereis(LeveledIndex), 10000),
+    ?awaitMatch(T when T =/= undefined, CountersGroup(), 10000),
     ok.
 
 %% Regression: removing a topic binding must also remove it from the
@@ -541,6 +556,119 @@ delayed_messages_count(Config) ->
     rabbit_ct_client_helpers:close_channel(Chan),
     ok.
 
+prometheus_delayed_messages_per_exchange(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex1 = make_exchange_name(Config, "1"),
+    Q1 = make_queue_name(Config, "1"),
+    Ex2 = make_exchange_name(Config, "2"),
+    Q2 = make_queue_name(Config, "2"),
+    %% A plain exchange must not be reported by the collector.
+    PlainEx = make_exchange_name(Config, "plain"),
+    PlainQ = make_queue_name(Config, "plain"),
+
+    setup_fabric(Chan, make_exchange(Ex1, <<"direct">>), make_queue(Q1)),
+    setup_fabric(Chan, make_exchange(Ex2, <<"direct">>), make_queue(Q2)),
+    setup_fabric(Chan,
+                 #'exchange.declare'{exchange = PlainEx, type = <<"direct">>},
+                 make_queue(PlainQ)),
+
+    Msgs1 = [5000, 5000, 5000],
+    Msgs2 = [5000, 5000],
+    publish_messages(Chan, Ex1, Msgs1),
+    publish_messages(Chan, Ex2, Msgs2),
+    publish_messages(Chan, PlainEx, [5000]),
+
+    %% Publishing is asynchronous, so the counts settle shortly after.
+    ?awaitMatch(3, delayed_count(Config, <<"/">>, Ex1), 3000),
+    ?awaitMatch(2, delayed_count(Config, <<"/">>, Ex2), 3000),
+    %% A plain exchange never delays messages, so it is never reported.
+    ?assertEqual(undefined, delayed_count(Config, <<"/">>, PlainEx)),
+
+    %% The payload of every published message is term_to_binary(Delay).
+    PayloadSize = byte_size(term_to_binary(5000)),
+    ?assertEqual(3 * PayloadSize, delayed_bytes(Config, <<"/">>, Ex1)),
+    ?assertEqual(2 * PayloadSize, delayed_bytes(Config, <<"/">>, Ex2)),
+    ?assertEqual(undefined, delayed_bytes(Config, <<"/">>, PlainEx)),
+
+    assert_metric_family(Config, Ex1, 3, 3 * PayloadSize),
+
+    consume(Chan, Q1, Msgs1),
+    consume(Chan, Q2, Msgs2),
+
+    ?awaitMatch(0, delayed_count(Config, <<"/">>, Ex1), 5000),
+    ?awaitMatch(0, delayed_count(Config, <<"/">>, Ex2), 5000),
+    %% Draining an exchange releases its bytes as well.
+    ?assertEqual(0, delayed_bytes(Config, <<"/">>, Ex1)),
+    ?assertEqual(0, delayed_bytes(Config, <<"/">>, Ex2)),
+
+    delete_exchange(Chan, Ex1),
+    delete_exchange(Chan, Ex2),
+    delete_exchange(Chan, PlainEx),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+prometheus_delayed_messages_vhost_filter(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_exchange(Ex, <<"direct">>), make_queue(Q)),
+
+    Msgs = [5000, 5000],
+    publish_messages(Chan, Ex, Msgs),
+
+    ?awaitMatch(2, delayed_count(Config, <<"/">>, Ex), 3000),
+    case collect_metric_families(Config, [delayed_exchange_metrics], [<<"/">>]) of
+        unavailable ->
+            ct:log("The prometheus application is unavailable on the node, "
+                   "skipping vhost filter assertions");
+        MFs ->
+            assert_metric(MFs, <<"rabbitmq_detailed_delayed_messages">>, Ex, 2),
+            %% Filtering on another vhost hides every series.
+            ?assertEqual([], collect_metric_families(
+                               Config, [delayed_exchange_metrics], [<<"other">>]))
+    end,
+
+    consume(Chan, Q, Msgs),
+
+    delete_exchange(Chan, Ex),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+%% Counters of a deleted exchange are dropped: no metric can be attributed to
+%% an exchange that no longer exists, even if some of its messages are still
+%% delayed on disk.
+counters_removed_on_exchange_delete(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    %% A dedicated exchange name: the messages left behind by this test would
+    %% otherwise decrease the counters of an exchange declared by a later one.
+    Ex = make_exchange_name(Config, "deleted"),
+    Q = make_queue_name(Config, "deleted"),
+
+    setup_fabric(Chan, make_exchange(Ex, <<"direct">>), make_queue(Q)),
+
+    Delay = 3000,
+    publish_messages(Chan, Ex, [Delay, Delay]),
+    ?awaitMatch(2, delayed_count(Config, <<"/">>, Ex), 3000),
+
+    delete_exchange(Chan, Ex),
+    %% The exchange type callback only fires on the node handling the delete,
+    %% which then tells every node to drop its counters, so this is async.
+    ?awaitMatch(undefined, exchange_counters(Config, <<"/">>, Ex), 3000),
+
+    %% The messages left behind then expire with no counters left to decrease.
+    %% That must not disturb the server: a crash would restart it, and the
+    %% counters of the deleted exchange would be rebuilt from the store.
+    timer:sleep(Delay + 2000),
+    ?assertEqual(undefined, exchange_counters(Config, <<"/">>, Ex)),
+
+    #'queue.delete_ok'{} = amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
 counter_survives_restart(Config) ->
     Chan = rabbit_ct_client_helpers:open_channel(Config),
 
@@ -569,6 +697,11 @@ counter_survives_restart(Config) ->
                     rabbit_exchange, info_all, [<<"/">>]),
     [Exchange] = lists:filter(FilterEx, Exchanges),
     {messages_delayed, MsgCount} = proplists:lookup(messages_delayed, Exchange),
+
+    %% The byte counter is rebuilt from the payload size kept in the Leveled
+    %% ledger head, so it has to survive the restart along with the count.
+    ?assertEqual(MsgCount * byte_size(term_to_binary(30000)),
+                 delayed_bytes(Config, <<"/">>, Ex)),
 
     {ok, _} = consume(Chan2, Q, Msgs),
     amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
@@ -763,6 +896,90 @@ make_queue_name(Config, Suffix) ->
 make_policy_name(Config, Suffix) ->
     B = rabbit_ct_helpers:get_config(Config, test_resource_name),
     erlang:list_to_binary("p-" ++ B ++ "-" ++ Suffix).
+
+delete_exchange(Chan, Ex) ->
+    #'exchange.delete_ok'{} =
+        amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex}).
+
+exchange_counters(Config, VHost, Ex) ->
+    XName = rabbit_misc:r(VHost, exchange, Ex),
+    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_counters,
+                                 counters, [XName]).
+
+delayed_count(Config, VHost, Ex) ->
+    counter_value(Config, VHost, Ex, delayed_messages).
+
+delayed_bytes(Config, VHost, Ex) ->
+    counter_value(Config, VHost, Ex, delayed_message_bytes).
+
+counter_value(Config, VHost, Ex, Field) ->
+    case exchange_counters(Config, VHost, Ex) of
+        undefined -> undefined;
+        Counters  -> maps:get(Field, Counters)
+    end.
+
+assert_metric_family(Config, Ex, ExpectedCount, ExpectedBytes) ->
+    case collect_metric_families(Config, [delayed_exchange_metrics], undefined) of
+        unavailable ->
+            ct:log("The prometheus application is unavailable on the node, "
+                   "skipping MetricFamily assertions");
+        MFs ->
+            %% seshat renders one metric family per counter field; the
+            %% collector emits them in map iteration order.
+            assert_metric(MFs, <<"rabbitmq_detailed_delayed_messages">>,
+                          Ex, ExpectedCount),
+            assert_metric(MFs, <<"rabbitmq_detailed_delayed_message_bytes">>,
+                          Ex, ExpectedBytes),
+            %% Nothing is collected unless the metric family is requested
+            %% explicitly, i.e. with the `family' query parameter.
+            ?assertEqual([], collect_metric_families(Config, [], undefined)),
+            ?assertEqual([], collect_metric_families(Config, [queue_coarse_metrics],
+                                                     undefined))
+    end.
+
+assert_metric(MFs, Name, Ex, Expected) ->
+    [MF] = [MF || MF <- MFs, MF#'MetricFamily'.name =:= Name],
+    ?assertEqual('GAUGE', MF#'MetricFamily'.type),
+    ?assertEqual(Expected, metric_value(MF, Ex)).
+
+%% Counter values are rendered as floats by seshat.
+metric_value(MF, Ex) ->
+    ExLabel = #'LabelPair'{name = <<"exchange">>, value = Ex},
+    case [Value || #'Metric'{label = Labels, gauge = #'Gauge'{value = Value}}
+                       <- MF#'MetricFamily'.metric,
+                   lists:member(ExLabel, Labels)] of
+        [Value] -> round(Value);
+        []      -> undefined
+    end.
+
+collect_metric_families(Config, Families, VHosts) ->
+    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, collect_metric_families,
+                                 [Families, VHosts]).
+
+%% Runs on the broker node. The collector reads its filters from the process
+%% dictionary, exactly like rabbit_prometheus_handler sets them up, so they
+%% must be set in the very process that calls collect_mf/2.
+collect_metric_families(Families, VHosts) ->
+    case code:ensure_loaded(prometheus_model_helpers) of
+        {module, _} ->
+            put(prometheus_mf_filter, Families),
+            case VHosts of
+                undefined -> ok;
+                _         -> put(prometheus_vhost_filter, VHosts)
+            end,
+            put(collected_metric_families, []),
+            Callback = fun(MF) ->
+                           put(collected_metric_families,
+                               [MF | get(collected_metric_families)])
+                       end,
+            ok = rabbit_delayed_message_prometheus:collect_mf(detailed, Callback),
+            MFs = lists:reverse(erase(collected_metric_families)),
+            erase(prometheus_mf_filter),
+            erase(prometheus_vhost_filter),
+            MFs;
+        _ ->
+            unavailable
+    end.
 
 get_publish_out_stat(Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, ets, tab2list, [channel_queue_exchange_metrics]).

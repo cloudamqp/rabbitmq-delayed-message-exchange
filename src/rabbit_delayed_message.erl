@@ -17,7 +17,9 @@
 -export([start_link/0,
          disable_plugin/0,
          delay_message/3,
-         messages_delayed/1
+         exchange_deleted/1,
+         messages_delayed/1,
+         bytes_delayed/1
         ]).
 
 %% Gen server exports
@@ -51,8 +53,23 @@ delay_message(Exchange, Message, Delay) ->
     gen_server:call(?MODULE, {delay_message, Exchange, Message, Delay},
                     infinity).
 
+%% Delayed messages live on the node that accepted the publish, so every node
+%% keeps its own counters for an exchange while the exchange type's delete
+%% callback only runs on the node handling the deletion. The cast is dropped
+%% by nodes where the plugin is not running, and going through the gen_server
+%% keeps counter updates single-writer.
+-spec exchange_deleted(rabbit_types:exchange()) -> ok.
+exchange_deleted(Exchange) ->
+    Id = rabbit_delayed_message_counters:id(Exchange),
+    _ = [gen_server:cast({?MODULE, Node}, {exchange_deleted, Id})
+         || Node <- rabbit_nodes:list_running()],
+    ok.
+
 messages_delayed(Exchange) ->
-    rabbit_delayed_message_leveled:messages_delayed(Exchange).
+    rabbit_delayed_message_counters:messages_delayed(Exchange).
+
+bytes_delayed(Exchange) ->
+    rabbit_delayed_message_counters:bytes_delayed(Exchange).
 
 refresh_config() ->
     gen_server:call(?MODULE, refresh_config).
@@ -79,6 +96,9 @@ handle_call(refresh_config, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
+handle_cast({exchange_deleted, Id}, State) ->
+    ok = rabbit_delayed_message_counters:forget(Id),
+    {noreply, State};
 handle_cast(_C, State) ->
     {noreply, State}.
 
