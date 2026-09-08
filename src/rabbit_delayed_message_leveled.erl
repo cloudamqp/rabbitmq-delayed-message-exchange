@@ -20,6 +20,7 @@
 
 -export([setup/0,
          disable_plugin/0,
+         compact_journal/0,
          messages_delayed/1,
          store_delay/3,
          get_first_delay/0,
@@ -71,6 +72,34 @@ setup() ->
 disable_plugin() ->
     catch ets:delete(?INDEX_TABLE),
     leveled_bookie:book_destroy(?BOOKIE).
+
+%% Asks the bookie to compact the journal. Returns as soon as the job is
+%% handed to leveled's inker: the compaction itself runs in leveled's own
+%% clerk process. `busy' means the previous run has not finished yet.
+-spec compact_journal() -> ok | busy | not_running | {error, term()}.
+compact_journal() ->
+    case ?BOOKIE of
+        undefined ->
+            not_running;
+        Bookie ->
+            try
+                %% 300 passed to book_compactjournal/2 for API compatibility
+                %% only: leveled discards it (see
+                %% leveled_inker:ink_compactjournal/3).
+                leveled_bookie:book_compactjournal(Bookie, 300)
+            catch
+                %% The bookie is gone or going away, which happens while
+                %% rabbit_delayed_message restarts or the plugin is being
+                %% disabled. Not an error: the next run picks it up.
+                exit:{Reason, _} when Reason =:= noproc;
+                                      Reason =:= normal;
+                                      Reason =:= shutdown;
+                                      Reason =:= killed ->
+                    not_running;
+                Class:Reason ->
+                    {error, {Class, Reason}}
+            end
+    end.
 
 messages_delayed(Exchange) ->
     case get_counter(exchange_to_counter_bin(Exchange)) of

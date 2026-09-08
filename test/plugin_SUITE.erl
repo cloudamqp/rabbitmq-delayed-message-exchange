@@ -22,7 +22,11 @@ all() ->
 groups() ->
     [
       {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}, {group, leveled_only}]},
-      {leveled_only, [], [disable_cleanup]},
+      {leveled_only, [], [reload_strategy_is_recovr,
+                          journal_compaction_is_scheduled,
+                          journal_compaction_interval_is_refreshed,
+                          journal_compaction_on_live_store,
+                          disable_cleanup]},
       {leveled_projection_v1, [], [topic_projection_v1_to_v2_migration]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
@@ -162,6 +166,44 @@ routing_topic(Config) ->
     %% all except <<"b.b.c">> should be routed.
     Count = 3,
     routing_test0(Config, BKs, RKs, <<"topic">>, Count).
+
+%% Journal compaction can only drop superseded objects and tombstones
+%% under the `recovr' reload strategy; leveled tests what that strategy
+%% then does, this only pins down that the store asks for it.
+reload_strategy_is_recovr(Config) ->
+    Opts = rabbit_ct_broker_helpers:rpc(
+             Config, 0, rabbit_delayed_message_leveled, start_opts,
+             ["/tmp/unused"]),
+    ?assertEqual([{delayed_msg, recovr}],
+                 proplists:get_value(reload_strategy, Opts)),
+    ok.
+
+%% Leveled never schedules journal compaction itself, so the plugin's
+%% gen_server has to keep asking for it.
+journal_compaction_is_scheduled(Config) ->
+    ?assert(compaction_timer_remaining(Config) =< 600_000),
+    ok.
+
+%% A changed interval has to be picked up without a node restart, and
+%% zero has to disable the periodic runs and then re-arm them.
+journal_compaction_interval_is_refreshed(Config) ->
+    try
+        set_compaction_interval(Config, 60_000),
+        ?assert(compaction_timer_remaining(Config) =< 60_000),
+        set_compaction_interval(Config, 0),
+        ?assertEqual(undefined, compaction_timer(Config))
+    after
+        unset_compaction_interval(Config)
+    end,
+    ?assert(compaction_timer_remaining(Config) > 60_000),
+    ok.
+
+%% A run has to reach the live store, whatever it then finds to reclaim.
+journal_compaction_on_live_store(Config) ->
+    ?assertEqual(ok, rabbit_ct_broker_helpers:rpc(
+                       Config, 0, rabbit_delayed_message,
+                       compact_journal, [])),
+    ok.
 
 %% Regression: disabling the plugin must run the cleanup boot steps.
 %% Two pieces of state need to be released:
@@ -783,3 +825,31 @@ set_collect_stats(Config, CollectStats) ->
 
 refresh_config(Config) ->
     ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, refresh_config, []).
+
+set_compaction_interval(Config, Interval) ->
+    ok = rabbit_ct_broker_helpers:rpc(
+           Config, 0, application, set_env,
+           [rabbitmq_delayed_message_exchange, journal_compaction_interval,
+            Interval]),
+    refresh_config(Config).
+
+unset_compaction_interval(Config) ->
+    ok = rabbit_ct_broker_helpers:rpc(
+           Config, 0, application, unset_env,
+           [rabbitmq_delayed_message_exchange, journal_compaction_interval]),
+    refresh_config(Config).
+
+%% The state record is #state{timer, compaction_timer, stats_state}.
+compaction_timer(Config) ->
+    {state, _Timer, TRef, _StatsState} =
+        rabbit_ct_broker_helpers:rpc(
+          Config, 0, sys, get_state, [rabbit_delayed_message]),
+    TRef.
+
+compaction_timer_remaining(Config) ->
+    TRef = compaction_timer(Config),
+    ?assert(is_reference(TRef)),
+    Remaining = rabbit_ct_broker_helpers:rpc(
+                  Config, 0, erlang, read_timer, [TRef]),
+    ?assert(is_integer(Remaining)),
+    Remaining.

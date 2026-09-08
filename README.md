@@ -192,6 +192,35 @@ The Leveled-based storage has two notable characteristics:
  * **Stable behavior under scheduling collisions**: write and startup times remain stable even when
    a large number of messages are scheduled to the exact same expiry timestamp.
 
+### Disk Space Reclamation
+
+Delivering a message does not free its disk space right away. Leveled appends a tombstone
+to its journal and the space is only given back when the journal is compacted. Leveled never
+schedules compaction itself, so the plugin triggers it on a timer, every 10 minutes by default.
+
+The interval, in milliseconds, can be changed with the `journal_compaction_interval` setting
+in `advanced.config`. Setting it to `0` disables the periodic runs:
+
+```erlang
+[
+  {rabbitmq_delayed_message_exchange, [
+    {journal_compaction_interval, 600000}
+  ]}
+].
+```
+
+A run can only reclaim journal entries that the on-disk ledger already covers, so a store that
+has seen little traffic since the node started may hold on to its journal for a while even
+though the messages in it have all been delivered.
+
+`advanced.config` is read at boot. To change the interval on a running node, set the
+application environment variable and ask the plugin to re-read its configuration:
+
+```erlang
+application:set_env(rabbitmq_delayed_message_exchange, journal_compaction_interval, 60000),
+rabbit_delayed_message:refresh_config().
+```
+
 
 ## Limitations
 
