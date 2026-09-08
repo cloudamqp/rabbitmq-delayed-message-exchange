@@ -23,7 +23,6 @@
 -define(METRIC_FAMILY, delayed_exchange_metrics).
 
 register_collector() ->
-    {ok, _} = application:ensure_all_started(prometheus),
     ok = prometheus_registry:register_collector(?REGISTRY, ?MODULE).
 
 deregister_collector() ->
