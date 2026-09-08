@@ -49,7 +49,7 @@ start_opts(Path) ->
                  end,
     [{root_path, Path},
      {compression_method, none},
-     {reload_strategy, [{?DELAYED_MSG_TAG, retain}]},
+     {reload_strategy, [{?DELAYED_MSG_TAG, recovr}]},
      {override_functions, [{extract_metadata, ExtractFun}]}].
 
 start_db() ->
