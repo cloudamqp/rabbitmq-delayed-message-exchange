@@ -192,14 +192,11 @@ The Leveled-based storage has two notable characteristics:
  * **Stable behavior under scheduling collisions**: write and startup times remain stable even when
    a large number of messages are scheduled to the exact same expiry timestamp.
 
-### Disk Space Reclamation
+## Configuration
 
-Delivering a message does not free its disk space right away. Leveled appends a tombstone
-to its journal and the space is only given back when the journal is compacted. Leveled never
-schedules compaction itself, so the plugin triggers it on a timer, every 10 minutes by default.
-
-The interval, in milliseconds, can be changed with the `journal_compaction_interval` setting
-in `advanced.config`. Setting it to `0` disables the periodic runs:
+The plugin has no `rabbitmq.conf` settings. It reads its configuration from the
+`rabbitmq_delayed_message_exchange` application environment, which is set in
+[`advanced.config`](https://www.rabbitmq.com/docs/configure#advanced-config-file):
 
 ```erlang
 [
@@ -209,17 +206,30 @@ in `advanced.config`. Setting it to `0` disables the periodic runs:
 ].
 ```
 
-A run can only reclaim journal entries that the on-disk ledger already covers, so a store that
-has seen little traffic since the node started may hold on to its journal for a while even
-though the messages in it have all been delivered.
+ * `journal_compaction_interval`: how often, in milliseconds, the plugin asks Leveled to compact
+   its journal. Defaults to `600000` (10 minutes); `0` disables the periodic runs
 
-`advanced.config` is read at boot. To change the interval on a running node, set the
+Delivering a message appends a tombstone to the Leveled journal instead of freeing the space the
+message occupied, and that space only comes back when the journal is compacted. Leveled leaves the
+scheduling of journal compaction to the application embedding it, so the plugin has to ask for it,
+and this setting controls how often. Note that a run can only reclaim journal entries that the
+on-disk ledger already covers, so a store that has seen little traffic since the node started may
+hold on to its journal even though the messages in it have all been delivered.
+
+`advanced.config` is only read at boot. To change the interval on a running node, set the
 application environment variable and ask the plugin to re-read its configuration:
 
 ```erlang
 application:set_env(rabbitmq_delayed_message_exchange, journal_compaction_interval, 60000),
 rabbit_delayed_message:refresh_config().
 ```
+
+`rabbit_delayed_message:compact_journal()` runs a compaction immediately, independently of the
+schedule.
+
+Leveled's [design notes](https://github.com/martinsumner/leveled/blob/develop-3.4/docs/DESIGN.md)
+and [startup options](https://github.com/martinsumner/leveled/blob/develop-3.4/docs/STARTUP_OPTIONS.md)
+describe how its journal, ledger and compaction work.
 
 
 ## Limitations
