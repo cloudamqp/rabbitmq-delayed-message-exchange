@@ -11,10 +11,10 @@
 
 -define(APP, rabbitmq_delayed_message_exchange).
 
-%% Default interval between journal compactions in milliseconds. Needed
+%% Default interval between journal compactions in seconds. Needed
 %% because leveled never compacts its journal on its own and delegates
 %% invoking compaction to the application.
--define(DEFAULT_COMPACTION_INTERVAL, 600_000).
+-define(DEFAULT_COMPACTION_INTERVAL_SECONDS, 600).
 
 -behaviour(gen_server).
 
@@ -254,20 +254,20 @@ schedule_compaction() ->
     case compaction_interval() of
         0 ->
             undefined;
-        Interval ->
-            erlang:start_timer(Interval, self(), compact_journal)
+        Seconds ->
+            erlang:start_timer(timer:seconds(Seconds), self(), compact_journal)
     end.
 
 compaction_interval() ->
-    case application:get_env(?APP, journal_compaction_interval,
-                             ?DEFAULT_COMPACTION_INTERVAL) of
-        Interval when is_integer(Interval), Interval >= 0 ->
-            Interval;
+    case application:get_env(?APP, journal_compaction_interval_seconds,
+                             ?DEFAULT_COMPACTION_INTERVAL_SECONDS) of
+        Seconds when is_integer(Seconds), Seconds >= 0 ->
+            Seconds;
         Invalid ->
             ?LOG_WARNING("Delayed message exchange: invalid "
-                         "journal_compaction_interval ~tp, using ~b ms",
-                         [Invalid, ?DEFAULT_COMPACTION_INTERVAL]),
-            ?DEFAULT_COMPACTION_INTERVAL
+                         "journal_compaction_interval_seconds ~tp, using ~b s",
+                         [Invalid, ?DEFAULT_COMPACTION_INTERVAL_SECONDS]),
+            ?DEFAULT_COMPACTION_INTERVAL_SECONDS
     end.
 
 setup() ->

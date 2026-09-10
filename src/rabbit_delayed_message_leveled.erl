@@ -8,8 +8,11 @@
 -module(rabbit_delayed_message_leveled).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
+-include_lib("kernel/include/logger.hrl").
 -include_lib("leveled/include/leveled.hrl").
 -include("rabbit_delayed_message.hrl").
+
+-define(APP, rabbitmq_delayed_message_exchange).
 
 -define(BOOKIE(Bookie), persistent_term:put({?MODULE, bookie}, Bookie)).
 -define(BOOKIE, persistent_term:get({?MODULE, bookie}, undefined)).
@@ -37,6 +40,29 @@
 % --------------------------------------------
 -define(BUCKET, <<"x-delayed-messages">>).
 
+%% Below this, leveled's jitter calculation for the journal roll points
+%% divides by zero (see leveled_bookie:set_options/2).
+-define(MIN_JOURNAL_ROLL, 5).
+
+%% Leveled's own defaults for the two compaction targets. Needed to check
+%% the invariant leveled asserts on before it will start.
+-define(DEFAULT_SINGLEFILE_COMPACTIONPERCENTAGE, 30.0).
+-define(DEFAULT_MAXRUNLENGTH_COMPACTIONPERCENTAGE, 70.0).
+
+%% Bookie options an operator may override, and how their values are
+%% validated. They are read from the application environment under the
+%% name leveled gives them. Everything else start_opts/1 passes is fixed:
+%% the reload strategy and the metadata extractor are load-bearing for
+%% this store, and the root path is where the plugin keeps its data.
+-define(TUNABLE_BOOKIE_OPTS,
+        [{max_run_length, {integer, 1}},
+         {journalcompaction_scoreonein, {integer, 1}},
+         {max_journalobjectcount, {integer, ?MIN_JOURNAL_ROLL}},
+         {max_journalsize, {integer, ?MIN_JOURNAL_ROLL}},
+         {waste_retention_period, {integer, 1}},
+         {singlefile_compactionpercentage, percentage},
+         {maxrunlength_compactionpercentage, percentage}]).
+
 start_opts(Path) ->
     ExtractFun = fun(?DELAYED_MSG_TAG, _Size, delete) ->
                          {{0, 0, undefined}, []};
@@ -48,10 +74,72 @@ start_opts(Path) ->
                          % not needed to detect changes.
                          {{0, Size, exchange_to_counter_bin(Exchange)}, []}
                  end,
+    %% The fixed options come first so that no tunable can shadow them:
+    %% leveled reads options with proplists:get_value/2, which returns
+    %% the first match.
     [{root_path, Path},
      {compression_method, none},
      {reload_strategy, [{?DELAYED_MSG_TAG, recovr}]},
-     {override_functions, [{extract_metadata, ExtractFun}]}].
+     {override_functions, [{extract_metadata, ExtractFun}]}
+     | tunable_bookie_opts()].
+
+%% Options left unset here are left out of the proplist entirely so that
+%% leveled applies its own default.
+tunable_bookie_opts() ->
+    check_compaction_targets(
+      lists:filtermap(fun tunable_bookie_opt/1, ?TUNABLE_BOOKIE_OPTS)).
+
+tunable_bookie_opt({Key, Type}) ->
+    case application:get_env(?APP, Key) of
+        undefined ->
+            false;
+        {ok, Value} ->
+            case validate_bookie_opt(Type, Value) of
+                {ok, Validated} ->
+                    {true, {Key, Validated}};
+                error ->
+                    ?LOG_WARNING("Delayed message exchange: invalid ~ts ~tp, "
+                                 "using the Leveled default",
+                                 [Key, Value]),
+                    false
+            end
+    end.
+
+validate_bookie_opt({integer, Min}, Value)
+  when is_integer(Value), Value >= Min ->
+    {ok, Value};
+%% leveled matches the compaction targets against is_float/1, so an
+%% integer given in advanced.config has to be widened here.
+validate_bookie_opt(percentage, Value)
+  when is_integer(Value), Value >= 0, Value =< 100 ->
+    {ok, float(Value)};
+validate_bookie_opt(percentage, Value)
+  when is_float(Value), Value >= 0.0, Value =< 100.0 ->
+    {ok, Value};
+validate_bookie_opt(_Type, _Value) ->
+    error.
+
+%% leveled refuses to start when a run of max_run_length is allowed to
+%% keep less than a single file is, so a pair that would take the node
+%% down on boot is dropped in favour of leveled's defaults.
+check_compaction_targets(Opts) ->
+    SingleFile = proplists:get_value(singlefile_compactionpercentage, Opts,
+                                     ?DEFAULT_SINGLEFILE_COMPACTIONPERCENTAGE),
+    MaxRun = proplists:get_value(maxrunlength_compactionpercentage, Opts,
+                                 ?DEFAULT_MAXRUNLENGTH_COMPACTIONPERCENTAGE),
+    case MaxRun >= SingleFile of
+        true ->
+            Opts;
+        false ->
+            ?LOG_WARNING("Delayed message exchange: "
+                         "maxrunlength_compactionpercentage ~tp is below "
+                         "singlefile_compactionpercentage ~tp, using the "
+                         "Leveled defaults for both",
+                         [MaxRun, SingleFile]),
+            lists:foldl(fun proplists:delete/2, Opts,
+                        [singlefile_compactionpercentage,
+                         maxrunlength_compactionpercentage])
+    end.
 
 start_db() ->
     Path = filename:join([rabbit_plugins:user_provided_plugins_data_dir(),
