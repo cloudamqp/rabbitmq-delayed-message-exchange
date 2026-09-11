@@ -259,16 +259,8 @@ schedule_compaction() ->
     end.
 
 compaction_interval() ->
-    case application:get_env(?APP, journal_compaction_interval_seconds,
-                             ?DEFAULT_COMPACTION_INTERVAL_SECONDS) of
-        Seconds when is_integer(Seconds), Seconds >= 0 ->
-            Seconds;
-        Invalid ->
-            ?LOG_WARNING("Delayed message exchange: invalid "
-                         "journal_compaction_interval_seconds ~tp, using ~b s",
-                         [Invalid, ?DEFAULT_COMPACTION_INTERVAL_SECONDS]),
-            ?DEFAULT_COMPACTION_INTERVAL_SECONDS
-    end.
+    application:get_env(?APP, journal_compaction_interval_seconds,
+                        ?DEFAULT_COMPACTION_INTERVAL_SECONDS).
 
 setup() ->
     rabbit_delayed_message_leveled:setup().

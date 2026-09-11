@@ -15,7 +15,8 @@
 all() ->
     [
      run_snippets,
-     inconsistent_compaction_targets_are_rejected
+     inconsistent_compaction_targets_are_rejected,
+     out_of_range_bookie_opts_are_rejected
     ].
 
 %%--------------------------------------------------------------------
@@ -46,10 +47,8 @@ run_snippets(Config) ->
     rabbit_ct_config_schema:run_snippets(Config).
 
 %% Leveled refuses to start when the max run compaction target is below
-%% the single file one. Such a pair is rejected here so that it is
-%% reported before it is applied, and so that this check matches the one
-%% the store does on the values reaching it through advanced.config,
-%% which is not validated against the schema.
+%% the single file one, so the schema has to reject such a pair before it
+%% is applied.
 inconsistent_compaction_targets_are_rejected(Config) ->
     ?assertMatch(
        {error, apply_translations, _},
@@ -80,6 +79,20 @@ inconsistent_compaction_targets_are_rejected(Config) ->
                  lists:sort(
                    proplists:get_value(rabbitmq_delayed_message_exchange,
                                        Generated))),
+    ok.
+
+%% The bounds Leveled would refuse to start with, or divide by zero on,
+%% are the schema's to enforce.
+out_of_range_bookie_opts_are_rejected(Config) ->
+    [?assertMatch({error, _, _}, generate_config(Config, Snippet))
+     || Snippet <- ["delayed_message_exchange.leveled.max_run_length = 0\n",
+                    "delayed_message_exchange.leveled.journalcompaction_scoreonein = 0\n",
+                    "delayed_message_exchange.leveled.max_journalobjectcount = 4\n",
+                    "delayed_message_exchange.leveled.max_journalsize = 4\n",
+                    "delayed_message_exchange.leveled.waste_retention_period_seconds = 0\n",
+                    "delayed_message_exchange.leveled.singlefile_compactionpercentage = 101.0\n",
+                    "delayed_message_exchange.leveled.maxrunlength_compactionpercentage = 101.0\n",
+                    "delayed_message_exchange.journal_compaction_interval_seconds = -1\n"]],
     ok.
 
 %%--------------------------------------------------------------------

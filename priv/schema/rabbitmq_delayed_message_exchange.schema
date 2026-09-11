@@ -128,7 +128,10 @@ end}.
 ]}.
 
 %% Number of entries after which a journal file is rolled. Only a rolled
-%% file can be compacted, and it is also the unit of reclaim.
+%% file can be compacted, and it is also the unit of reclaim. The minimum
+%% of 5 is Leveled's: below it the jitter it adds to the roll point is a
+%% division by zero (see leveled_bookie:set_options/2). The same goes for
+%% max_journalsize.
 %%
 %% delayed_message_exchange.leveled.max_journalobjectcount = 200000
 

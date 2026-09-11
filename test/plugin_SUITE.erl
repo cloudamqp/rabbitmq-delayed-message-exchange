@@ -24,8 +24,6 @@ groups() ->
       {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}, {group, leveled_only}]},
       {leveled_only, [], [reload_strategy_is_recovr,
                           bookie_opts_are_tunable,
-                          invalid_bookie_opts_are_ignored,
-                          inconsistent_compaction_targets_are_ignored,
                           fixed_bookie_opts_cannot_be_overridden,
                           tuned_bookie_starts,
                           journal_compaction_is_scheduled,
@@ -183,8 +181,8 @@ reload_strategy_is_recovr(Config) ->
                  proplists:get_value(reload_strategy, Opts)),
     ok.
 
-%% The compaction tunables reach the bookie, and a percentage given as an
-%% integer is widened to the float leveled matches on.
+%% The compaction tunables reach the bookie as they are set. Their values
+%% are the schema's business, not this module's.
 bookie_opts_are_tunable(Config) ->
     Opts = with_bookie_opts(
              Config,
@@ -193,7 +191,7 @@ bookie_opts_are_tunable(Config) ->
               {max_journalobjectcount, 50_000},
               {max_journalsize, 536_870_912},
               {waste_retention_period, 3600},
-              {singlefile_compactionpercentage, 40},
+              {singlefile_compactionpercentage, 40.0},
               {maxrunlength_compactionpercentage, 80.0}]),
     ?assertEqual(4, proplists:get_value(max_run_length, Opts)),
     ?assertEqual(4, proplists:get_value(journalcompaction_scoreonein, Opts)),
@@ -204,44 +202,6 @@ bookie_opts_are_tunable(Config) ->
                  proplists:get_value(singlefile_compactionpercentage, Opts)),
     ?assertEqual(80.0,
                  proplists:get_value(maxrunlength_compactionpercentage, Opts)),
-    ok.
-
-%% A value leveled would crash on has to be dropped, leaving its default.
-invalid_bookie_opts_are_ignored(Config) ->
-    Opts = with_bookie_opts(
-             Config,
-             [{max_run_length, 0},
-              %% Below this leveled divides by zero when it jitters the
-              %% journal roll points.
-              {max_journalobjectcount, 4},
-              {max_journalsize, "1GB"},
-              {singlefile_compactionpercentage, 101.0},
-              {waste_retention_period, -1}]),
-    ?assertEqual(undefined, proplists:get_value(max_run_length, Opts)),
-    ?assertEqual(undefined, proplists:get_value(max_journalobjectcount, Opts)),
-    ?assertEqual(undefined, proplists:get_value(max_journalsize, Opts)),
-    ?assertEqual(undefined,
-                 proplists:get_value(singlefile_compactionpercentage, Opts)),
-    ?assertEqual(undefined, proplists:get_value(waste_retention_period, Opts)),
-    ok.
-
-%% leveled refuses to start when the max run target is below the single
-%% file one, so the plugin drops such a pair instead of failing to boot.
-inconsistent_compaction_targets_are_ignored(Config) ->
-    Opts = with_bookie_opts(
-             Config,
-             [{singlefile_compactionpercentage, 80.0},
-              {maxrunlength_compactionpercentage, 40.0}]),
-    ?assertEqual(undefined,
-                 proplists:get_value(singlefile_compactionpercentage, Opts)),
-    ?assertEqual(undefined,
-                 proplists:get_value(maxrunlength_compactionpercentage, Opts)),
-    %% A single file target above leveled's default max run target is
-    %% inconsistent in the same way.
-    Opts1 = with_bookie_opts(Config,
-                             [{singlefile_compactionpercentage, 80.0}]),
-    ?assertEqual(undefined,
-                 proplists:get_value(singlefile_compactionpercentage, Opts1)),
     ok.
 
 %% The options the store depends on are not tunable, whatever the
@@ -257,14 +217,13 @@ fixed_bookie_opts_cannot_be_overridden(Config) ->
     ?assertEqual("/tmp/unused", proplists:get_value(root_path, Opts)),
     ok.
 
-%% The values handed to the bookie have to be ones leveled accepts: a
-%% percentage given as an integer and a journal roll point of a handful of
-%% objects both take the bookie down if they reach it unchanged.
+%% A bookie tuned the way the schema allows starts and compacts, down to
+%% the smallest journal roll point leveled accepts.
 tuned_bookie_starts(Config) ->
     Tunables = [{max_journalobjectcount, 5},
                 {journalcompaction_scoreonein, 2},
-                {singlefile_compactionpercentage, 40},
-                {maxrunlength_compactionpercentage, 80}],
+                {singlefile_compactionpercentage, 40.0},
+                {maxrunlength_compactionpercentage, 80.0}],
     ok = rabbit_ct_broker_helpers:disable_plugin(
            Config, 0, rabbitmq_delayed_message_exchange),
     [ok = rabbit_ct_broker_helpers:rpc(
