@@ -1,0 +1,60 @@
+[
+{journal_compaction_interval_seconds,
+    "delayed_message_exchange.journal_compaction_interval_seconds = 300",
+    [{rabbitmq_delayed_message_exchange, [
+        {journal_compaction_interval_seconds, 300}
+    ]}],
+    [rabbitmq_delayed_message_exchange]
+},
+
+{journal_compaction_disabled,
+    "delayed_message_exchange.journal_compaction_interval_seconds = 0",
+    [{rabbitmq_delayed_message_exchange, [
+        {journal_compaction_interval_seconds, 0}
+    ]}],
+    [rabbitmq_delayed_message_exchange]
+},
+
+{leveled_compaction_tunables,
+    "delayed_message_exchange.leveled.max_run_length = 4
+     delayed_message_exchange.leveled.singlefile_compactionpercentage = 40.0
+     delayed_message_exchange.leveled.maxrunlength_compactionpercentage = 80.0
+     delayed_message_exchange.leveled.journalcompaction_scoreonein = 4",
+    [{rabbitmq_delayed_message_exchange, [
+        {journalcompaction_scoreonein, 4},
+        {max_run_length, 4},
+        {maxrunlength_compactionpercentage, 80.0},
+        {singlefile_compactionpercentage, 40.0}
+    ]}],
+    [rabbitmq_delayed_message_exchange]
+},
+
+%% The percentages are widened to floats, which is what leveled matches on.
+{leveled_compaction_percentages_as_integers,
+    "delayed_message_exchange.leveled.singlefile_compactionpercentage = 40
+     delayed_message_exchange.leveled.maxrunlength_compactionpercentage = 80",
+    [{rabbitmq_delayed_message_exchange, [
+        {maxrunlength_compactionpercentage, 80.0},
+        {singlefile_compactionpercentage, 40.0}
+    ]}],
+    [rabbitmq_delayed_message_exchange]
+},
+
+{leveled_journal_roll_points,
+    "delayed_message_exchange.leveled.max_journalobjectcount = 50000
+     delayed_message_exchange.leveled.max_journalsize = 512MB",
+    [{rabbitmq_delayed_message_exchange, [
+        {max_journalobjectcount, 50000},
+        {max_journalsize, 536870912}
+    ]}],
+    [rabbitmq_delayed_message_exchange]
+},
+
+{leveled_waste_retention_period,
+    "delayed_message_exchange.leveled.waste_retention_period_seconds = 3600",
+    [{rabbitmq_delayed_message_exchange, [
+        {waste_retention_period, 3600}
+    ]}],
+    [rabbitmq_delayed_message_exchange]
+}
+].

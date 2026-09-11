@@ -1,0 +1,162 @@
+%% ----------------------------------------------------------------------------
+%% RabbitMQ Delayed Message Exchange
+%%
+%% ----------------------------------------------------------------------------
+
+%% How often, in seconds, the plugin asks Leveled to compact the journal of
+%% its message store. Leveled leaves the scheduling of journal compaction to
+%% the application embedding it, so the plugin has to ask for it.
+%%
+%% Set to 0 to disable the periodic runs.
+%%
+%% delayed_message_exchange.journal_compaction_interval_seconds = 600
+
+{mapping, "delayed_message_exchange.journal_compaction_interval_seconds",
+ "rabbitmq_delayed_message_exchange.journal_compaction_interval_seconds", [
+    {datatype, {integer, non_negative}}
+]}.
+
+%% The settings below are passed straight to the Leveled bookie the plugin
+%% keeps its messages in, under the name Leveled gives them. Leaving one
+%% unset leaves Leveled's own default in place. Their meaning is described in
+%% Leveled's startup options documentation:
+%% https://github.com/martinsumner/leveled/blob/develop-3.4/docs/STARTUP_OPTIONS.md
+
+%% Largest number of consecutive journal files a single compaction run may
+%% rewrite. This caps how long a run can take.
+%%
+%% delayed_message_exchange.leveled.max_run_length = 8
+
+{mapping, "delayed_message_exchange.leveled.max_run_length",
+ "rabbitmq_delayed_message_exchange.max_run_length", [
+    {datatype, {integer, positive}}
+]}.
+
+%% Percentage of a journal file that may be kept for that file to still be
+%% worth compacting on its own. The default 30.0 means a file has to be at
+%% least 70% reclaimable. Has to be at or below
+%% maxrunlength_compactionpercentage.
+%%
+%% delayed_message_exchange.leveled.singlefile_compactionpercentage = 30.0
+
+{mapping, "delayed_message_exchange.leveled.singlefile_compactionpercentage",
+ "rabbitmq_delayed_message_exchange.singlefile_compactionpercentage", [
+    {datatype, [{float, [{min, 0.0}, {max, 100.0}]},
+                {integer, [{min, 0}, {max, 100}]}]}
+]}.
+
+%% Leveled refuses to start when a run of max_run_length files is allowed
+%% to keep less than a single file is, so the two targets are checked
+%% against each other. Both translations do it, with Leveled's own
+%% defaults standing in, because either setting may be left unset.
+{translation, "rabbitmq_delayed_message_exchange.singlefile_compactionpercentage",
+fun(Conf) ->
+    %% Leveled matches the compaction targets against is_float/1, so an
+    %% integer has to be widened here.
+    Target =
+        fun(Key, Default) ->
+            case cuttlefish:conf_get(Key, Conf, Default) of
+                Value when is_integer(Value) -> float(Value);
+                Value                        -> Value
+            end
+        end,
+    SingleFile = Target(
+      "delayed_message_exchange.leveled.singlefile_compactionpercentage",
+      30.0),
+    MaxRun = Target(
+      "delayed_message_exchange.leveled.maxrunlength_compactionpercentage",
+      70.0),
+    case MaxRun >= SingleFile of
+        true ->
+            SingleFile;
+        false ->
+            cuttlefish:invalid(
+              "delayed_message_exchange.leveled.maxrunlength_compactionpercentage "
+              "has to be at or above "
+              "delayed_message_exchange.leveled.singlefile_compactionpercentage")
+    end
+end}.
+
+%% The same percentage for a run of max_run_length files, interpolated for
+%% shorter runs. Has to be at or above singlefile_compactionpercentage.
+%%
+%% delayed_message_exchange.leveled.maxrunlength_compactionpercentage = 70.0
+
+{mapping, "delayed_message_exchange.leveled.maxrunlength_compactionpercentage",
+ "rabbitmq_delayed_message_exchange.maxrunlength_compactionpercentage", [
+    {datatype, [{float, [{min, 0.0}, {max, 100.0}]},
+                {integer, [{min, 0}, {max, 100}]}]}
+]}.
+
+{translation, "rabbitmq_delayed_message_exchange.maxrunlength_compactionpercentage",
+fun(Conf) ->
+    %% Leveled matches the compaction targets against is_float/1, so an
+    %% integer has to be widened here.
+    Target =
+        fun(Key, Default) ->
+            case cuttlefish:conf_get(Key, Conf, Default) of
+                Value when is_integer(Value) -> float(Value);
+                Value                        -> Value
+            end
+        end,
+    SingleFile = Target(
+      "delayed_message_exchange.leveled.singlefile_compactionpercentage",
+      30.0),
+    MaxRun = Target(
+      "delayed_message_exchange.leveled.maxrunlength_compactionpercentage",
+      70.0),
+    case MaxRun >= SingleFile of
+        true ->
+            MaxRun;
+        false ->
+            cuttlefish:invalid(
+              "delayed_message_exchange.leveled.maxrunlength_compactionpercentage "
+              "has to be at or above "
+              "delayed_message_exchange.leveled.singlefile_compactionpercentage")
+    end
+end}.
+
+%% Probability (1 in this many) that a journal file is rescored on a
+%% compaction run rather than reusing its cached score. The default 1
+%% rescores every file on every run.
+%%
+%% delayed_message_exchange.leveled.journalcompaction_scoreonein = 1
+
+{mapping, "delayed_message_exchange.leveled.journalcompaction_scoreonein",
+ "rabbitmq_delayed_message_exchange.journalcompaction_scoreonein", [
+    {datatype, {integer, positive}}
+]}.
+
+%% Number of entries after which a journal file is rolled. Only a rolled
+%% file can be compacted, and it is also the unit of reclaim. The minimum
+%% of 5 is Leveled's: below it the jitter it adds to the roll point is a
+%% division by zero (see leveled_bookie:set_options/2). The same goes for
+%% max_journalsize.
+%%
+%% delayed_message_exchange.leveled.max_journalobjectcount = 200000
+
+{mapping, "delayed_message_exchange.leveled.max_journalobjectcount",
+ "rabbitmq_delayed_message_exchange.max_journalobjectcount", [
+    {datatype, {integer, [{min, 5}]}}
+]}.
+
+%% Size at which a journal file is rolled, whichever comes first with
+%% max_journalobjectcount. Leveled caps this at 4GB.
+%%
+%% delayed_message_exchange.leveled.max_journalsize = 1GB
+
+{mapping, "delayed_message_exchange.leveled.max_journalsize",
+ "rabbitmq_delayed_message_exchange.max_journalsize", [
+    {datatype, [{bytesize, [{min, 5}]}, {integer, [{min, 5}]}]}
+]}.
+
+%% How long, in seconds, journal files that compaction has replaced are
+%% kept in a waste directory instead of being deleted. Leaving this unset
+%% deletes them, which is what reclaims the disk space.
+%%
+%% delayed_message_exchange.leveled.waste_retention_period_seconds = 3600
+
+{mapping, "delayed_message_exchange.leveled.waste_retention_period_seconds",
+ "rabbitmq_delayed_message_exchange.waste_retention_period", [
+    {datatype, {integer, positive}}
+]}.
