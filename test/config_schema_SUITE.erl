@@ -10,10 +10,12 @@
 -compile([export_all, nowarn_export_all]).
 
 -include_lib("common_test/include/ct.hrl").
+-include_lib("eunit/include/eunit.hrl").
 
 all() ->
     [
-     run_snippets
+     run_snippets,
+     inconsistent_compaction_targets_are_rejected
     ].
 
 %%--------------------------------------------------------------------
@@ -43,6 +45,43 @@ end_per_testcase(Testcase, Config) ->
 run_snippets(Config) ->
     rabbit_ct_config_schema:run_snippets(Config).
 
+%% Leveled refuses to start when the max run compaction target is below
+%% the single file one. Such a pair is rejected here so that it is
+%% reported before it is applied, and so that this check matches the one
+%% the store does on the values reaching it through advanced.config,
+%% which is not validated against the schema.
+inconsistent_compaction_targets_are_rejected(Config) ->
+    ?assertMatch(
+       {error, apply_translations, _},
+       generate_config(
+         Config,
+         "delayed_message_exchange.leveled.singlefile_compactionpercentage = 80.0\n"
+         "delayed_message_exchange.leveled.maxrunlength_compactionpercentage = 40.0\n")),
+    %% Either setting may be left unset, in which case the pair has to be
+    %% checked against Leveled's own default for the other one.
+    ?assertMatch(
+       {error, apply_translations, _},
+       generate_config(
+         Config,
+         "delayed_message_exchange.leveled.singlefile_compactionpercentage = 80.0\n")),
+    ?assertMatch(
+       {error, apply_translations, _},
+       generate_config(
+         Config,
+         "delayed_message_exchange.leveled.maxrunlength_compactionpercentage = 20.0\n")),
+    %% Leveled asserts on the two being at or above each other, so an
+    %% equal pair has to be accepted.
+    Generated = generate_config(
+                  Config,
+                  "delayed_message_exchange.leveled.singlefile_compactionpercentage = 40.0\n"
+                  "delayed_message_exchange.leveled.maxrunlength_compactionpercentage = 40.0\n"),
+    ?assertEqual([{maxrunlength_compactionpercentage, 40.0},
+                  {singlefile_compactionpercentage, 40.0}],
+                 lists:sort(
+                   proplists:get_value(rabbitmq_delayed_message_exchange,
+                                       Generated))),
+    ok.
+
 %%--------------------------------------------------------------------
 %% Helpers
 %%--------------------------------------------------------------------
@@ -69,3 +108,11 @@ make_schema_discoverable(Config) ->
     DepsDir = filename:dirname(code:lib_dir(rabbit_common)),
     true = os:putenv("RABBITMQ_PLUGINS_DIR", PluginsDir ++ ":" ++ DepsDir),
     ok.
+
+generate_config(Config, Snippet) ->
+    File = filename:join(?config(priv_dir, Config), "snippet.conf"),
+    ok = file:write_file(File, Snippet),
+    Schemas = rabbit_prelaunch_conf:find_cuttlefish_schemas(
+                rabbit_env:get_context()),
+    cuttlefish_generator:map(cuttlefish_schema:files(Schemas),
+                             cuttlefish_conf:files([File])).

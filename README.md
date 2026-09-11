@@ -289,11 +289,12 @@ the same name, except for `waste_retention_period_seconds`, whose environment ke
 Everything else the plugin passes to the bookie is fixed, including the `recovr` reload strategy
 and the metadata extractor, both of which this store depends on.
 
-Values that Leveled would refuse to start with are ignored with a warning in the log rather than
-taken, so a typo in `advanced.config` (which, unlike `rabbitmq.conf`, is not validated against the
-schema) cannot keep the node from booting. That includes a
-`maxrunlength_compactionpercentage`/`singlefile_compactionpercentage` pair in the wrong order, in
-which case both fall back to the Leveled defaults.
+In `rabbitmq.conf` these are validated against the plugin's schema, which also rejects a
+`maxrunlength_compactionpercentage`/`singlefile_compactionpercentage` pair in the wrong order, so
+such a configuration is reported before it is applied. `advanced.config` is not validated that way,
+so there values that Leveled would refuse to start with are ignored with a warning in the log rather
+than taken, and a typo cannot keep the node from booting. That includes an inconsistent pair of
+compaction percentages, in which case both fall back to the Leveled defaults.
 
 Leveled's [design notes](https://github.com/martinsumner/leveled/blob/develop-3.4/docs/DESIGN.md)
 and [startup options](https://github.com/martinsumner/leveled/blob/develop-3.4/docs/STARTUP_OPTIONS.md)

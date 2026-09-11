@@ -34,7 +34,8 @@
 
 %% Percentage of a journal file that may be kept for that file to still be
 %% worth compacting on its own. The default 30.0 means a file has to be at
-%% least 70% reclaimable.
+%% least 70% reclaimable. Has to be at or below
+%% maxrunlength_compactionpercentage.
 %%
 %% delayed_message_exchange.leveled.singlefile_compactionpercentage = 30.0
 
@@ -44,12 +45,35 @@
                 {integer, [{min, 0}, {max, 100}]}]}
 ]}.
 
+%% Leveled refuses to start when a run of max_run_length files is allowed
+%% to keep less than a single file is, so the two targets are checked
+%% against each other. Both translations do it, with Leveled's own
+%% defaults standing in, because either setting may be left unset.
 {translation, "rabbitmq_delayed_message_exchange.singlefile_compactionpercentage",
 fun(Conf) ->
-    Key = "delayed_message_exchange.leveled.singlefile_compactionpercentage",
-    case cuttlefish:conf_get(Key, Conf) of
-        Value when is_integer(Value) -> float(Value);
-        Value                        -> Value
+    %% Leveled matches the compaction targets against is_float/1, so an
+    %% integer has to be widened here.
+    Target =
+        fun(Key, Default) ->
+            case cuttlefish:conf_get(Key, Conf, Default) of
+                Value when is_integer(Value) -> float(Value);
+                Value                        -> Value
+            end
+        end,
+    SingleFile = Target(
+      "delayed_message_exchange.leveled.singlefile_compactionpercentage",
+      30.0),
+    MaxRun = Target(
+      "delayed_message_exchange.leveled.maxrunlength_compactionpercentage",
+      70.0),
+    case MaxRun >= SingleFile of
+        true ->
+            SingleFile;
+        false ->
+            cuttlefish:invalid(
+              "delayed_message_exchange.leveled.maxrunlength_compactionpercentage "
+              "has to be at or above "
+              "delayed_message_exchange.leveled.singlefile_compactionpercentage")
     end
 end}.
 
@@ -66,10 +90,29 @@ end}.
 
 {translation, "rabbitmq_delayed_message_exchange.maxrunlength_compactionpercentage",
 fun(Conf) ->
-    Key = "delayed_message_exchange.leveled.maxrunlength_compactionpercentage",
-    case cuttlefish:conf_get(Key, Conf) of
-        Value when is_integer(Value) -> float(Value);
-        Value                        -> Value
+    %% Leveled matches the compaction targets against is_float/1, so an
+    %% integer has to be widened here.
+    Target =
+        fun(Key, Default) ->
+            case cuttlefish:conf_get(Key, Conf, Default) of
+                Value when is_integer(Value) -> float(Value);
+                Value                        -> Value
+            end
+        end,
+    SingleFile = Target(
+      "delayed_message_exchange.leveled.singlefile_compactionpercentage",
+      30.0),
+    MaxRun = Target(
+      "delayed_message_exchange.leveled.maxrunlength_compactionpercentage",
+      70.0),
+    case MaxRun >= SingleFile of
+        true ->
+            MaxRun;
+        false ->
+            cuttlefish:invalid(
+              "delayed_message_exchange.leveled.maxrunlength_compactionpercentage "
+              "has to be at or above "
+              "delayed_message_exchange.leveled.singlefile_compactionpercentage")
     end
 end}.
 
