@@ -81,8 +81,8 @@ inconsistent_compaction_targets_are_rejected(Config) ->
                                        Generated))),
     ok.
 
-%% The bounds Leveled would refuse to start with, or divide by zero on,
-%% are the schema's to enforce.
+%% It is the schema's job to enforce the value boundaries outside which leveled
+%% would refuse to start or crash with a division by zero.
 out_of_range_bookie_opts_are_rejected(Config) ->
     [?assertMatch({error, _, _}, generate_config(Config, Snippet))
      || Snippet <- ["delayed_message_exchange.leveled.max_run_length = 0\n",
