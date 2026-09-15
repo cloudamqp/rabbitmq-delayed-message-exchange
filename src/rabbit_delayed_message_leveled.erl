@@ -25,8 +25,6 @@
 -export([setup/0,
          disable_plugin/0,
          compact_journal/0,
-         messages_delayed/1,
-         bytes_delayed/1,
          store_delay/3,
          get_first_delay/0,
          get_many/1,
@@ -145,12 +143,6 @@ compact_journal() ->
                     {error, {Class, Reason}}
             end
     end.
-
-messages_delayed(Exchange) ->
-    counter_value(exchange_to_counter_bin(Exchange), ?COUNTER_MESSAGES).
-
-bytes_delayed(Exchange) ->
-    counter_value(exchange_to_counter_bin(Exchange), ?COUNTER_BYTES).
 
 store_delay(DelayTS, Exchange, Message) ->
     ExNameBin = rabbit_delayed_message_counters:id(Exchange),
