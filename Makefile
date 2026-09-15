@@ -19,7 +19,10 @@ dep_leveled                = git https://github.com/martinsumner/leveled.git dev
 # plugin. leveled is configured to use no compression, so neither NIF is needed
 # at runtime. They are still fetched transitively by leveled for compilation
 # but must not be started as OTP applications.
-DEPS = rabbit_common rabbit leveled
+DEPS = rabbit_common rabbit leveled seshat
+# prometheus is a build-only dependency: the collector module is compiled
+# against it, but the plugin does not require rabbitmq_prometheus to be enabled.
+BUILD_DEPS = prometheus
 export IGNORE_DEPS += eqwalizer_support
 TEST_DEPS = ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck
 dep_ct_helper = git https://github.com/extend/ct_helper.git master
@@ -33,8 +36,8 @@ DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk
 ERLANG_MK_REPO = https://github.com/rabbitmq/erlang.mk.git
 ERLANG_MK_COMMIT = rabbitmq-tmp
 
-include rabbitmq-components.mk
-include erlang.mk
+include ../../rabbitmq-components.mk
+include ../../erlang.mk
 
 # Strip lz4 and zstd from leveled's OTP application list. Patching the source
 # .app.src file means the generated leveled.app will already have them absent

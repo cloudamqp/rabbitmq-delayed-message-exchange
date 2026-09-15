@@ -121,6 +121,7 @@ validate_binding(X, B) ->
 create(Serial, X) ->
     ?EXCHANGE(X):create(Serial, X).
 delete(Serial, X) ->
+    ok = rabbit_delayed_message:exchange_deleted(X),
     ?EXCHANGE(X):delete(Serial, X).
 policy_changed(X1, X2) ->
     ?EXCHANGE(X1):policy_changed(X1, X2).
