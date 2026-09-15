@@ -640,22 +640,14 @@ delayed_messages_count(Config) ->
 
     setup_fabric(Chan, make_exchange(Ex, <<"direct">>), make_queue(Q)),
 
-    Msgs = [500, 200, 300, 200, 300, 400],
+    %% The delays must outlast every control plane operation performed below,
+    %% otherwise messages are delivered mid-test and the counts drop.
+    Msgs = [5000, 5000, 5000, 5000, 5000, 5000],
 
     publish_messages(Chan, Ex, Msgs),
 
-    % Let messages schedule.
-    timer:sleep(50),
-    Exchanges = rabbit_ct_broker_helpers:rpc(Config, 0,
-          rabbit_exchange, info_all, [<<"/">>]),
-
-    FilterEx =
-        fun(X) ->
-                {resource, <<"/">>, exchange, Ex} == proplists:get_value(name, X)
-        end,
-
-    [Exchange] = lists:filter(FilterEx, Exchanges),
-    {messages_delayed, 6} = proplists:lookup(messages_delayed, Exchange),
+    %% Publishing is asynchronous, so the count settles shortly after.
+    ?awaitMatch(6, messages_delayed(Config, <<"/">>, Ex), 3000),
 
     %% Set a policy for the exchange
     PolicyName = make_policy_name(Config, "1"),
@@ -663,18 +655,11 @@ delayed_messages_count(Config) ->
       Config, 0, PolicyName, <<"^", Ex/binary>>, <<"exchanges">>, [{<<"alternate-exchange">>, <<"altex">>}]),
 
     %% Same message count returned for modified exchange
-    Exchanges2 = rabbit_ct_broker_helpers:rpc(Config, 0,
-          rabbit_exchange, info_all, [<<"/">>]),
-
-    [Exchange2] = lists:filter(FilterEx, Exchanges2),
-    {messages_delayed, 6} = proplists:lookup(messages_delayed, Exchange2),
+    ?assertEqual(6, messages_delayed(Config, <<"/">>, Ex)),
 
     consume(Chan, Q, Msgs),
 
-    Exchanges3 = rabbit_ct_broker_helpers:rpc(Config, 0,
-          rabbit_exchange, info_all, [<<"/">>]),
-    [Exchange3] = lists:filter(FilterEx, Exchanges3),
-    {messages_delayed, 0} = proplists:lookup(messages_delayed, Exchange3),
+    ?awaitMatch(0, messages_delayed(Config, <<"/">>, Ex), 5000),
 
     rabbit_ct_broker_helpers:clear_policy(Config, 0, PolicyName),
     rabbit_ct_client_helpers:close_channel(Chan),
@@ -1029,6 +1014,13 @@ exchange_counters(Config, VHost, Ex) ->
     XName = rabbit_misc:r(VHost, exchange, Ex),
     rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_counters,
                                  counters, [XName]).
+
+messages_delayed(Config, VHost, Ex) ->
+    Exchanges = rabbit_ct_broker_helpers:rpc(Config, 0,
+                                             rabbit_exchange, info_all, [VHost]),
+    XName = rabbit_misc:r(VHost, exchange, Ex),
+    [Exchange] = [X || X <- Exchanges, proplists:get_value(name, X) == XName],
+    proplists:get_value(messages_delayed, Exchange).
 
 delayed_count(Config, VHost, Ex) ->
     counter_value(Config, VHost, Ex, delayed_messages).
