@@ -192,6 +192,114 @@ The Leveled-based storage has two notable characteristics:
  * **Stable behavior under scheduling collisions**: write and startup times remain stable even when
    a large number of messages are scheduled to the exact same expiry timestamp.
 
+## Configuration
+
+The plugin reads its configuration from `rabbitmq.conf`:
+
+```ini
+delayed_message_exchange.journal_compaction_interval_seconds = 600
+```
+
+ * `journal_compaction_interval_seconds`: how often, in seconds, the plugin asks Leveled to
+   compact its journal. Defaults to `600` (10 minutes); `0` disables the periodic runs
+
+Delivering a message appends a tombstone to the Leveled journal instead of freeing the space the
+message occupied, and that space only comes back when the journal is compacted. Leveled leaves the
+scheduling of journal compaction to the application embedding it, so the plugin has to ask for it,
+and this setting controls how often. Note that a run can only reclaim journal entries that the
+on-disk ledger already covers, so a store that has seen little traffic since the node started may
+hold on to its journal even though the messages in it have all been delivered.
+
+`rabbit_delayed_message:compact_journal()` runs a compaction immediately, independently of the
+schedule. It returns `ok` once the run has been handed to Leveled, `busy` when the previous run has
+not finished yet (the periodic runs skip for the same reason), `not_running` when the store is not
+up, and `{error, Reason}` if the request could not be made.
+
+The same setting can be given in the `rabbitmq_delayed_message_exchange` application environment
+in [`advanced.config`](https://www.rabbitmq.com/docs/configure#advanced-config-file):
+
+```erlang
+[
+  {rabbitmq_delayed_message_exchange, [
+    {journal_compaction_interval_seconds, 600}
+  ]}
+].
+```
+
+Both files are only read at boot. To change the interval on a running node, set the application
+environment variable and ask the plugin to re-read its configuration:
+
+```erlang
+application:set_env(rabbitmq_delayed_message_exchange,
+                    journal_compaction_interval_seconds, 60),
+rabbit_delayed_message:refresh_config().
+```
+
+### Tuning the Leveled Store
+
+The settings below are passed straight to the Leveled bookie the plugin keeps its messages in,
+under the name Leveled gives them, so Leveled's
+[startup options](https://github.com/martinsumner/leveled/blob/develop-3.4/docs/STARTUP_OPTIONS.md)
+documentation applies to them as well. Leaving one unset leaves Leveled's own default in place.
+They are only read when the store starts, so a change needs a node restart (or a plugin disable and
+re-enable), unlike the compaction interval:
+
+```ini
+delayed_message_exchange.leveled.max_run_length = 8
+delayed_message_exchange.leveled.singlefile_compactionpercentage = 30.0
+delayed_message_exchange.leveled.maxrunlength_compactionpercentage = 70.0
+delayed_message_exchange.leveled.journalcompaction_scoreonein = 1
+delayed_message_exchange.leveled.max_journalobjectcount = 200000
+delayed_message_exchange.leveled.max_journalsize = 1GB
+delayed_message_exchange.leveled.waste_retention_period_seconds = 3600
+```
+
+ * `max_run_length`: largest number of consecutive journal files one compaction run may rewrite.
+   This is what caps how long a run can take. Defaults to `8`
+ * `singlefile_compactionpercentage`: percentage of a journal file that may be kept for that file
+   to still be worth compacting on its own. Defaults to `30.0`, meaning a file has to be at least
+   70% reclaimable
+ * `maxrunlength_compactionpercentage`: the same percentage for a run of `max_run_length` files,
+   interpolated for shorter runs. Defaults to `70.0`, and has to be at or above
+   `singlefile_compactionpercentage`
+ * `journalcompaction_scoreonein`: probability (1 in this many) that a journal file is rescored on
+   a run instead of reusing its cached score. Defaults to `1`, which rescores every file on every
+   run; higher values trade accuracy for less scan I/O
+ * `max_journalobjectcount`: number of entries after which a journal file is rolled. Only a rolled
+   file can be compacted, so this is also the unit of reclaim. Defaults to `200000`
+ * `max_journalsize`: size at which a journal file is rolled, whichever comes first with
+   `max_journalobjectcount`. Defaults to `1GB`, and Leveled caps it at 4GB
+ * `waste_retention_period_seconds`: how long journal files that compaction has replaced are kept
+   in a waste directory instead of being deleted. Unset by default, which deletes them; setting it
+   keeps the disk space for that long, so it is only useful for debugging
+
+In `advanced.config` these are `rabbitmq_delayed_message_exchange` application environment keys of
+the same name, except for `waste_retention_period_seconds`, whose environment key is Leveled's own
+`waste_retention_period`:
+
+```erlang
+[
+  {rabbitmq_delayed_message_exchange, [
+    {max_run_length, 4},
+    {singlefile_compactionpercentage, 40.0}
+  ]}
+].
+```
+
+Everything else the plugin passes to the bookie is fixed, including the `recovr` reload strategy
+and the metadata extractor, both of which this store depends on.
+
+Values set in `rabbitmq.conf` are validated against the plugin's schema, which also rejects a
+`maxrunlength_compactionpercentage`/`singlefile_compactionpercentage` pair in the wrong order, so
+such a configuration is reported before it is applied. Values set in `advanced.config` skip that
+validation and reach the bookie as they are, and Leveled refuses to start on one it does not accept:
+there the two compaction percentages have to be floats (`40.0`, not `40`) and in the right order.
+
+Leveled's [design notes](https://github.com/martinsumner/leveled/blob/develop-3.4/docs/DESIGN.md)
+and [startup options](https://github.com/martinsumner/leveled/blob/develop-3.4/docs/STARTUP_OPTIONS.md)
+describe how its journal, ledger and compaction work; the *Max Journal Size*, *Journal Compaction*
+and *Waste Retention Period* sections of the latter cover the settings above.
+
 
 ## Limitations
 

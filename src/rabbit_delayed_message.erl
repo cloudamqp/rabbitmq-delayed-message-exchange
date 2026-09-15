@@ -11,6 +11,11 @@
 
 -define(APP, rabbitmq_delayed_message_exchange).
 
+%% Default interval between journal compactions in seconds. Needed
+%% because leveled never compacts its journal on its own and delegates
+%% invoking compaction to the application.
+-define(DEFAULT_COMPACTION_INTERVAL_SECONDS, 600).
+
 -behaviour(gen_server).
 
 % Public API exports
@@ -24,8 +29,9 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
 
-%% Testing & debugging exports
--export([refresh_config/0]).
+%% Operator exports
+-export([refresh_config/0,
+         compact_journal/0]).
 
 -import(rabbit_delayed_message_utils, [swap_delay_header/1]).
 
@@ -33,6 +39,7 @@
 -type delay() :: non_neg_integer().
 
 -record(state, {timer,
+                compaction_timer,
                 stats_state}).
 
 %%--------------------------------------------------------------------
@@ -57,6 +64,11 @@ messages_delayed(Exchange) ->
 refresh_config() ->
     gen_server:call(?MODULE, refresh_config).
 
+%% Runs a journal compaction immediately, independently of the schedule.
+-spec compact_journal() -> ok | busy | not_running | {error, term()}.
+compact_journal() ->
+    gen_server:call(?MODULE, compact_journal, infinity).
+
 %%--------------------------------------------------------------------
 init([]) ->
     %% Trap exits so terminate/2 runs on supervisor shutdown and we get
@@ -65,7 +77,8 @@ init([]) ->
     process_flag(trap_exit, true),
     setup(),
     _ = recover(),
-    State0 = #state{timer = maybe_delay_first()},
+    State0 = #state{timer = maybe_delay_first(),
+                    compaction_timer = schedule_compaction()},
     State = rabbit_event:init_stats_timer(State0, #state.stats_state),
     {ok, State}.
 
@@ -74,8 +87,10 @@ handle_call({delay_message, Exchange, Message, Delay},
     Reply = {ok, NewTimer} = internal_delay_message(CurrTimer, Exchange, Message, Delay),
     State2 = State#state{timer = NewTimer},
     {reply, Reply, State2};
+handle_call(compact_journal, _From, State) ->
+    {reply, compact_journal_now(), State};
 handle_call(refresh_config, _From, State) ->
-    {reply, ok, refresh_config(State)};
+    {reply, ok, apply_config(State)};
 handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
@@ -91,6 +106,10 @@ handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
             delete(Key)
     end,
     {noreply, State#state{timer = maybe_delay_first()}};
+handle_info({timeout, TRef, compact_journal},
+            State = #state{compaction_timer = TRef}) ->
+    _ = compact_journal_now(),
+    {noreply, State#state{compaction_timer = schedule_compaction()}};
 handle_info({'EXIT', _Pid, normal}, State) ->
     {noreply, State};
 handle_info({'EXIT', _Pid, Reason}, State) ->
@@ -196,6 +215,53 @@ store_delayed(DelayTS, Exchange, Message) ->
 start_timer(Delay, Key) ->
     erlang:start_timer(erlang:max(0, Delay), self(), {deliver, Key}).
 
+compact_journal_now() ->
+    Result = rabbit_delayed_message_leveled:compact_journal(),
+    case Result of
+        ok ->
+            ?LOG_DEBUG("Delayed message exchange: journal compaction started");
+        busy ->
+            ?LOG_DEBUG("Delayed message exchange: previous journal compaction "
+                       "is still running, skipping this run");
+        not_running ->
+            ?LOG_DEBUG("Delayed message exchange: message store is not "
+                       "running, skipping journal compaction");
+        {error, Reason} ->
+            %% Worth reporting, but not worth taking this process down
+            %% over: the store keeps working, it just keeps its journal.
+            ?LOG_WARNING("Delayed message exchange: journal compaction "
+                         "could not be started: ~tp", [Reason])
+    end,
+    Result.
+
+cancel_compaction_timer(undefined) ->
+    ok;
+cancel_compaction_timer(TRef) ->
+    case erlang:cancel_timer(TRef) of
+        false ->
+            %% The timer had already fired, so drop the message it left
+            %% behind: the run it asked for is superseded by the one the
+            %% freshly scheduled timer will ask for.
+            receive
+                {timeout, TRef, compact_journal} -> ok
+            after 0 -> ok
+            end;
+        _ ->
+            ok
+    end.
+
+schedule_compaction() ->
+    case compaction_interval() of
+        0 ->
+            undefined;
+        Seconds ->
+            erlang:start_timer(timer:seconds(Seconds), self(), compact_journal)
+    end.
+
+compaction_interval() ->
+    application:get_env(?APP, journal_compaction_interval_seconds,
+                        ?DEFAULT_COMPACTION_INTERVAL_SECONDS).
+
 setup() ->
     rabbit_delayed_message_leveled:setup().
 
@@ -267,5 +333,9 @@ bump_routed_stats(ExName, Qs, State) ->
             ok
     end.
 
-refresh_config(State) ->
-    rabbit_event:init_stats_timer(State, #state.stats_state).
+%% Re-reads every setting this process caches in its state: the
+%% statistics level and the journal compaction interval.
+apply_config(State = #state{compaction_timer = TRef}) ->
+    ok = cancel_compaction_timer(TRef),
+    State1 = State#state{compaction_timer = schedule_compaction()},
+    rabbit_event:init_stats_timer(State1, #state.stats_state).

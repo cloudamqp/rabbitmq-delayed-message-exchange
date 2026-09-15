@@ -11,6 +11,8 @@
 -include_lib("leveled/include/leveled.hrl").
 -include("rabbit_delayed_message.hrl").
 
+-define(APP, rabbitmq_delayed_message_exchange).
+
 -define(BOOKIE(Bookie), persistent_term:put({?MODULE, bookie}, Bookie)).
 -define(BOOKIE, persistent_term:get({?MODULE, bookie}, undefined)).
 
@@ -20,6 +22,7 @@
 
 -export([setup/0,
          disable_plugin/0,
+         compact_journal/0,
          messages_delayed/1,
          store_delay/3,
          get_first_delay/0,
@@ -36,6 +39,21 @@
 % --------------------------------------------
 -define(BUCKET, <<"x-delayed-messages">>).
 
+%% Bookie options an operator may override. They are read from the
+%% application environment under the name leveled gives them, and are
+%% validated by the plugin's cuttlefish schema. Everything else
+%% start_opts/1 passes is fixed: the reload strategy and the metadata
+%% extractor are load-bearing for this store, and the root path is where
+%% the plugin keeps its data.
+-define(TUNABLE_BOOKIE_OPTS,
+        [max_run_length,
+         journalcompaction_scoreonein,
+         max_journalobjectcount,
+         max_journalsize,
+         waste_retention_period,
+         singlefile_compactionpercentage,
+         maxrunlength_compactionpercentage]).
+
 start_opts(Path) ->
     ExtractFun = fun(?DELAYED_MSG_TAG, _Size, delete) ->
                          {{0, 0, undefined}, []};
@@ -47,10 +65,25 @@ start_opts(Path) ->
                          % not needed to detect changes.
                          {{0, Size, exchange_to_counter_bin(Exchange)}, []}
                  end,
+    %% The fixed options come first so that no tunable can shadow them:
+    %% leveled reads options with proplists:get_value/2, which returns
+    %% the first match.
     [{root_path, Path},
      {compression_method, none},
-     {reload_strategy, [{?DELAYED_MSG_TAG, retain}]},
-     {override_functions, [{extract_metadata, ExtractFun}]}].
+     {reload_strategy, [{?DELAYED_MSG_TAG, recovr}]},
+     {override_functions, [{extract_metadata, ExtractFun}]}
+     | tunable_bookie_opts()].
+
+%% Options left unset are left out of the proplist entirely so that
+%% leveled applies its own default.
+tunable_bookie_opts() ->
+    lists:filtermap(
+      fun(Key) ->
+              case application:get_env(?APP, Key) of
+                  undefined   -> false;
+                  {ok, Value} -> {true, {Key, Value}}
+              end
+      end, ?TUNABLE_BOOKIE_OPTS).
 
 start_db() ->
     Path = filename:join([rabbit_plugins:user_provided_plugins_data_dir(),
@@ -71,6 +104,34 @@ setup() ->
 disable_plugin() ->
     catch ets:delete(?INDEX_TABLE),
     leveled_bookie:book_destroy(?BOOKIE).
+
+%% Asks the bookie to compact the journal. Returns as soon as the job is
+%% handed to leveled's inker: the compaction itself runs in leveled's own
+%% clerk process. `busy' means the previous run has not finished yet.
+-spec compact_journal() -> ok | busy | not_running | {error, term()}.
+compact_journal() ->
+    case ?BOOKIE of
+        undefined ->
+            not_running;
+        Bookie ->
+            try
+                %% 300 passed to book_compactjournal/2 for API compatibility
+                %% only: leveled discards it (see
+                %% leveled_inker:ink_compactjournal/3).
+                leveled_bookie:book_compactjournal(Bookie, 300)
+            catch
+                %% The bookie is gone or going away, which happens while
+                %% rabbit_delayed_message restarts or the plugin is being
+                %% disabled. Not an error: the next run picks it up.
+                exit:{Reason, _} when Reason =:= noproc;
+                                      Reason =:= normal;
+                                      Reason =:= shutdown;
+                                      Reason =:= killed ->
+                    not_running;
+                Class:Reason ->
+                    {error, {Class, Reason}}
+            end
+    end.
 
 messages_delayed(Exchange) ->
     case get_counter(exchange_to_counter_bin(Exchange)) of

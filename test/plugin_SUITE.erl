@@ -22,7 +22,14 @@ all() ->
 groups() ->
     [
       {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}, {group, leveled_only}]},
-      {leveled_only, [], [disable_cleanup]},
+      {leveled_only, [], [reload_strategy_is_recovr,
+                          bookie_opts_are_tunable,
+                          fixed_bookie_opts_cannot_be_overridden,
+                          tuned_bookie_starts,
+                          journal_compaction_is_scheduled,
+                          journal_compaction_interval_seconds_is_refreshed,
+                          journal_compaction_on_live_store,
+                          disable_cleanup]},
       {leveled_projection_v1, [], [topic_projection_v1_to_v2_migration]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
@@ -162,6 +169,123 @@ routing_topic(Config) ->
     %% all except <<"b.b.c">> should be routed.
     Count = 3,
     routing_test0(Config, BKs, RKs, <<"topic">>, Count).
+
+%% Journal compaction can only drop superseded objects and tombstones
+%% under the `recovr' reload strategy; leveled tests what that strategy
+%% then does, this only pins down that the store asks for it.
+reload_strategy_is_recovr(Config) ->
+    Opts = rabbit_ct_broker_helpers:rpc(
+             Config, 0, rabbit_delayed_message_leveled, start_opts,
+             ["/tmp/unused"]),
+    ?assertEqual([{delayed_msg, recovr}],
+                 proplists:get_value(reload_strategy, Opts)),
+    ok.
+
+%% The compaction tunables reach the bookie as they are set. Their values
+%% are the schema's business, not this module's.
+bookie_opts_are_tunable(Config) ->
+    Opts = with_bookie_opts(
+             Config,
+             [{max_run_length, 4},
+              {journalcompaction_scoreonein, 4},
+              {max_journalobjectcount, 50_000},
+              {max_journalsize, 536_870_912},
+              {waste_retention_period, 3600},
+              {singlefile_compactionpercentage, 40.0},
+              {maxrunlength_compactionpercentage, 80.0}]),
+    ?assertEqual(4, proplists:get_value(max_run_length, Opts)),
+    ?assertEqual(4, proplists:get_value(journalcompaction_scoreonein, Opts)),
+    ?assertEqual(50_000, proplists:get_value(max_journalobjectcount, Opts)),
+    ?assertEqual(536_870_912, proplists:get_value(max_journalsize, Opts)),
+    ?assertEqual(3600, proplists:get_value(waste_retention_period, Opts)),
+    ?assertEqual(40.0,
+                 proplists:get_value(singlefile_compactionpercentage, Opts)),
+    ?assertEqual(80.0,
+                 proplists:get_value(maxrunlength_compactionpercentage, Opts)),
+    ok.
+
+%% The options the store depends on are not tunable, whatever the
+%% application environment says.
+fixed_bookie_opts_cannot_be_overridden(Config) ->
+    Opts = with_bookie_opts(Config,
+                            [{reload_strategy, [{delayed_msg, retain}]},
+                             {compression_method, lz4},
+                             {root_path, "/tmp/somewhere_else"}]),
+    ?assertEqual([{delayed_msg, recovr}],
+                 proplists:get_value(reload_strategy, Opts)),
+    ?assertEqual(none, proplists:get_value(compression_method, Opts)),
+    ?assertEqual("/tmp/unused", proplists:get_value(root_path, Opts)),
+    ok.
+
+%% A bookie tuned the way the schema allows starts and compacts, down to
+%% the smallest journal roll point leveled accepts.
+tuned_bookie_starts(Config) ->
+    Tunables = [{max_journalobjectcount, 5},
+                {journalcompaction_scoreonein, 2},
+                {singlefile_compactionpercentage, 40.0},
+                {maxrunlength_compactionpercentage, 80.0}],
+    ok = rabbit_ct_broker_helpers:disable_plugin(
+           Config, 0, rabbitmq_delayed_message_exchange),
+    [ok = rabbit_ct_broker_helpers:rpc(
+            Config, 0, application, set_env,
+            [rabbitmq_delayed_message_exchange, Key, Value])
+     || {Key, Value} <- Tunables],
+    try
+        ok = rabbit_ct_broker_helpers:enable_plugin(
+               Config, 0, rabbitmq_delayed_message_exchange),
+        Chan = rabbit_ct_client_helpers:open_channel(Config),
+        Ex = make_exchange_name(Config, "1"),
+        Q = make_queue_name(Config, "1"),
+        setup_fabric(Chan, make_exchange(Ex, <<"topic">>), make_queue(Q),
+                     <<"a.*.c">>),
+        amqp_channel:call(Chan, #'confirm.select'{}),
+        publish_messages(Chan, Ex, <<"a.b.c">>, [60000]),
+        amqp_channel:wait_for_confirms_or_die(Chan),
+        ?assertEqual(ok, rabbit_ct_broker_helpers:rpc(
+                           Config, 0, rabbit_delayed_message,
+                           compact_journal, [])),
+        amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex}),
+        amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
+        rabbit_ct_client_helpers:close_channel(Chan)
+    after
+        [ok = rabbit_ct_broker_helpers:rpc(
+                Config, 0, application, unset_env,
+                [rabbitmq_delayed_message_exchange, Key])
+         || {Key, _Value} <- Tunables],
+        %% Leave the following cases a store started with the defaults.
+        ok = rabbit_ct_broker_helpers:disable_plugin(
+               Config, 0, rabbitmq_delayed_message_exchange),
+        ok = rabbit_ct_broker_helpers:enable_plugin(
+               Config, 0, rabbitmq_delayed_message_exchange)
+    end,
+    ok.
+
+%% Leveled never schedules journal compaction itself, so the plugin's
+%% gen_server has to keep asking for it.
+journal_compaction_is_scheduled(Config) ->
+    ?assert(compaction_timer_remaining(Config) =< 600_000),
+    ok.
+
+%% A changed interval has to be picked up without a node restart, and
+%% zero has to disable the periodic runs and then re-arm them.
+journal_compaction_interval_seconds_is_refreshed(Config) ->
+    try
+        set_compaction_interval_seconds(Config, 60),
+        ?assert(compaction_timer_remaining(Config) =< 60_000),
+        set_compaction_interval_seconds(Config, 0),
+        ?assertEqual(undefined, compaction_timer(Config))
+    after
+        unset_compaction_interval_seconds(Config)
+    end,
+    ?assert(compaction_timer_remaining(Config) > 60_000),
+    ok.
+
+%% A run has to reach the live store, whatever it then finds to reclaim.
+journal_compaction_on_live_store(Config) ->
+    ?assertEqual(ok, rabbit_ct_broker_helpers:rpc(
+                       Config, 0, rabbit_delayed_message,
+                       compact_journal, [])),
+    ok.
 
 %% Regression: disabling the plugin must run the cleanup boot steps.
 %% Two pieces of state need to be released:
@@ -783,3 +907,50 @@ set_collect_stats(Config, CollectStats) ->
 
 refresh_config(Config) ->
     ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message, refresh_config, []).
+
+set_compaction_interval_seconds(Config, Seconds) ->
+    ok = rabbit_ct_broker_helpers:rpc(
+           Config, 0, application, set_env,
+           [rabbitmq_delayed_message_exchange,
+            journal_compaction_interval_seconds, Seconds]),
+    refresh_config(Config).
+
+unset_compaction_interval_seconds(Config) ->
+    ok = rabbit_ct_broker_helpers:rpc(
+           Config, 0, application, unset_env,
+           [rabbitmq_delayed_message_exchange,
+            journal_compaction_interval_seconds]),
+    refresh_config(Config).
+
+%% Returns start_opts/1 as it looks with the given bookie options set in
+%% the plugin's application environment, leaving the environment as it was.
+with_bookie_opts(Config, Opts) ->
+    [ok = rabbit_ct_broker_helpers:rpc(
+            Config, 0, application, set_env,
+            [rabbitmq_delayed_message_exchange, Key, Value])
+     || {Key, Value} <- Opts],
+    try
+        rabbit_ct_broker_helpers:rpc(
+          Config, 0, rabbit_delayed_message_leveled, start_opts,
+          ["/tmp/unused"])
+    after
+        [ok = rabbit_ct_broker_helpers:rpc(
+                Config, 0, application, unset_env,
+                [rabbitmq_delayed_message_exchange, Key])
+         || {Key, _Value} <- Opts]
+    end.
+
+%% The state record is #state{timer, compaction_timer, stats_state}.
+compaction_timer(Config) ->
+    {state, _Timer, TRef, _StatsState} =
+        rabbit_ct_broker_helpers:rpc(
+          Config, 0, sys, get_state, [rabbit_delayed_message]),
+    TRef.
+
+compaction_timer_remaining(Config) ->
+    TRef = compaction_timer(Config),
+    ?assert(is_reference(TRef)),
+    Remaining = rabbit_ct_broker_helpers:rpc(
+                  Config, 0, erlang, read_timer, [TRef]),
+    ?assert(is_integer(Remaining)),
+    Remaining.
