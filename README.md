@@ -128,8 +128,7 @@ Two rules hold for the whole procedure:
 1. Upgrade the broker to RabbitMQ 4.2.6 or a later 4.2.x release, with `khepri_db`
    still disabled. Fork v4.2.6 requires 4.2.6 because migrating the plugin's
    dynamically named Mnesia tables needs
-   [rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139),
-   and it needs Erlang 26.2 or later
+   [rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139)
 1. Install fork v4.2.6 in place of the original plugin on every node: download
    `rabbitmq_delayed_message_exchange-4.2.6-erlang-26.zip` from the release, extract
    both `.ez` files it contains (one for the plugin, one for `leveled`) into the
@@ -152,7 +151,7 @@ Two rules hold for the whole procedure:
    appears under `user_provided_plugins_data_dir/rabbit_delayed_message/leveled` in the
    [node's data directory](https://www.rabbitmq.com/docs/relocate), and messages
    scheduled before the upgrade are still delivered on time
-1. Upgrade the broker to RabbitMQ 4.3.3 or later (Erlang 27 or later, and `khepri_db`
+1. Upgrade the broker to RabbitMQ 4.3.3 or later (Erlang 27 or newer, and `khepri_db`
    is required there) and replace the `.ez` files with the ones from the matching
    release of this plugin. The on-disk Leveled store is read as it is, no further
    data migration takes place
