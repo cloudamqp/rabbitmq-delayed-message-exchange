@@ -101,6 +101,94 @@ To enable the plugin run the following command:
 rabbitmq-plugins enable rabbitmq_delayed_message_exchange
 ```
 
+## Upgrading from the Original Plugin
+
+This version keeps delayed messages in Leveled and has no Mnesia code left, so it
+cannot see the messages the [original
+plugin](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange), or any version
+of this fork running on a cluster without `khepri_db`, stored in Mnesia. The upgrade path goes through
+[v4.2.6](https://github.com/cloudamqp/rabbitmq-delayed-message-exchange/releases/tag/v4.2.6)
+of this fork, the last release that still ships the Mnesia backend: it uses the
+table names and record layout of the original plugin, so it picks up your existing
+delayed messages and keeps working with them, and it carries the Mnesia-to-Leveled
+migration that runs when the `khepri_db` feature flag is enabled.
+
+Two rules hold for the whole procedure:
+
+ * **do not disable the plugin at any point**, not even to swap the `.ez` files:
+   disabling it destroys the storage and **ALL DELAYED MESSAGES THAT HAVEN'T BEEN
+   DELIVERED WILL BE LOST**
+ * **do not enable `khepri_db` before v4.2.6 of this fork is running on every
+   node**: the plugin picks its backend from whether that flag is enabled, so if
+   it is already enabled the first time this fork starts, the plugin goes straight
+   to Leveled and the messages sitting in the Mnesia tables are never migrated
+
+### The Upgrade Path
+
+1. Upgrade the broker to RabbitMQ 4.2.6 or a later 4.2.x release, with `khepri_db`
+   still disabled. Fork v4.2.6 requires 4.2.6 because migrating the plugin's
+   dynamically named Mnesia tables needs
+   [rabbitmq/rabbitmq-server#16139](https://github.com/rabbitmq/rabbitmq-server/pull/16139),
+   and it needs Erlang 26.2 or later
+1. Install fork v4.2.6 in place of the original plugin on every node: download
+   `rabbitmq_delayed_message_exchange-4.2.6-erlang-26.zip` from the release, extract
+   both `.ez` files it contains (one for the plugin, one for `leveled`) into the
+   [node's plugins directory](https://rabbitmq.com/plugins.html#plugin-directories),
+   and remove the original plugin's `.ez` from there. Leave the plugin enabled
+1. Restart the nodes, one at a time if you prefer: each node keeps its delayed
+   messages in tables of its own. From the outside nothing should change, the plugin
+   keeps working with the same Mnesia tables, only the code behind them is the fork's
+1. Enable the metadata store feature flag once for the cluster:
+
+   ``` bash
+   rabbitmqctl enable_feature_flag khepri_db
+   ```
+
+   This triggers the plugin's migration: pending delayed messages are copied out of
+   Mnesia into the node-local Leveled store, and the plugin switches to it once the
+   flag is fully enabled
+1. Confirm the migration went through before going any further: the node log records
+   the copy (`Mnesia->Leveled data copy` entries, at debug level), a Leveled store
+   appears under `user_provided_plugins_data_dir/rabbit_delayed_message/leveled` in the
+   [node's data directory](https://www.rabbitmq.com/docs/relocate), and messages
+   scheduled before the upgrade are still delivered on time
+1. Upgrade the broker to RabbitMQ 4.3.3 or later (Erlang 27 or later, and `khepri_db`
+   is required there) and replace the `.ez` files with the ones from the matching
+   release of this plugin. The on-disk Leveled store is read as it is, no further
+   data migration takes place
+1. Enable the plugin's own feature flag once every node runs the new version (see
+   _Feature Flags_ above):
+
+   ``` bash
+   rabbitmqctl enable_feature_flag delayed_message_topic_projection_v2
+   ```
+
+From that point on this plugin is upgraded like any other one: drop in the new `.ez`
+files and restart the node.
+
+Rehearse the whole path on a test cluster before running it in production: the
+delayed messages of a node exist in one copy, on that node, and there is no way to
+recover them if a step goes wrong.
+
+### When `khepri_db` Is Already Enabled
+
+A cluster that enabled `khepri_db` while still running the original plugin has no
+automatic path for the messages already in Mnesia: whichever version of this fork is
+installed afterwards starts on an empty Leveled store and the Mnesia tables are left
+untouched. Drain the backlog first instead. Stop publishing to the delayed exchanges,
+wait until every scheduled message has been delivered, and only then swap the plugin
+for this fork. There is nothing to migrate at that point, so the intermediate v4.2.6
+step can be skipped as well.
+
+### After the Migration
+
+Messages stored by v4.3.3 and earlier, including the ones the migration copied out of
+Mnesia, carry no payload size in their store metadata: the byte counter did not exist
+yet. They are counted as zero bytes by `rabbitmq_detailed_delayed_message_bytes` (see
+_Prometheus Metrics_ below) until they are delivered, so the reported size of an
+exchange with a pre-upgrade backlog is lower than the actual one. The message counts
+are unaffected.
+
 ## Usage ##
 
 To use the delayed-messaging feature, declare an exchange with the
