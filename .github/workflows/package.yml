@@ -47,6 +47,8 @@ jobs:
 
       - name: Build ez file
         working-directory: ${{ env.PLUGIN_FOLDER }}
+        env:
+          PLUGIN_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: make dist DIST_AS_EZS=true
 
       - name: Upload artifacts
