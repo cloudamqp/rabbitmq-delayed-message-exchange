@@ -21,6 +21,8 @@
 %% Called through RPC from the node running the Mnesia->Khepri migration.
 -export([remote_init_to_khepri/1]).
 
+-export([rollback_local_copy/0]).
+
 -record(?MODULE, {}).
 
 %% Entry point used by RabbitMQ's khepri_db migration. It only runs on the
@@ -68,14 +70,40 @@ init_copy_to_khepri(_StoreId, _MigrationId, Tables, no_fan_out) ->
       Ret :: ok | {error, any()}.
 remote_init_to_khepri(StoreId) ->
     Tables = rabbit_delayed_message_mnesia:table_names(),
-    MigrationId = <<"rabbit_delayed_message_",
-                    (atom_to_binary(node()))/binary>>,
     ?LOG_INFO(
        "Mnesia->Leveled data copy: copying local tables ~0p",
        [Tables],
        #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
-    mnesia_to_khepri:copy_tables(StoreId, MigrationId, Tables,
+    mnesia_to_khepri:copy_tables(StoreId, local_migration_id(), Tables,
                                  {?MODULE, no_fan_out}).
+
+%% Undoes this node's part of an aborted khepri_db migration. RabbitMQ only
+%% rolls back its own migration, so the copy made by remote_init_to_khepri/1
+%% would otherwise keep this node's tables read-only while the cluster stays
+%% on Mnesia. The Leveled store is destroyed too: Mnesia remains the source of
+%% truth, and stale copies would be delivered again by a later migration.
+-spec rollback_local_copy() -> ok.
+rollback_local_copy() ->
+    StoreId = rabbit_khepri:get_store_id(),
+    case mnesia_to_khepri:rollback_table_copy(StoreId, local_migration_id()) of
+        ok ->
+            ?LOG_INFO(
+               "Mnesia->Leveled data copy: rolled back local copy",
+               #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN});
+        {error, {no_such_migration, _}} ->
+            %% This node ran the main migration, already rolled back by
+            %% RabbitMQ, or never copied its tables.
+            ok;
+        {error, Reason} ->
+            ?LOG_WARNING(
+               "Mnesia->Leveled data copy: failed to roll back local copy: ~p",
+               [Reason],
+               #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN})
+    end,
+    rabbit_delayed_message_leveled:destroy_db().
+
+local_migration_id() ->
+    <<"rabbit_delayed_message_", (atom_to_binary(node()))/binary>>.
 
 copy_on_other_nodes(StoreId) ->
     case mnesia:system_info(db_nodes) -- [node()] of

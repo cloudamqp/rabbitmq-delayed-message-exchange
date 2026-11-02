@@ -323,5 +323,6 @@ maybe_switch_to_leveled(State = #state{timer = CurrTimer}) ->
             rabbit_log:warning("Delayed message exchange: "
                              "khepri_db feature flag is not enabled, "
                              "delayed messages will continue to be stored in Mnesia"),
+            rabbit_delayed_message_m2k_converter:rollback_local_copy(),
             State
     end.
