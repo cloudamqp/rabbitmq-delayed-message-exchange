@@ -14,18 +14,43 @@
 -include("rabbit_delayed_message.hrl").
 
 -export([init_copy_to_khepri/3,
+         init_copy_to_khepri/4,
          copy_to_khepri/3,
          delete_from_khepri/3]).
 
+%% Called through RPC from the node running the Mnesia->Khepri migration.
+-export([remote_init_to_khepri/1]).
+
 -record(?MODULE, {}).
 
+%% Entry point used by RabbitMQ's khepri_db migration. It only runs on the
+%% node performing the data copy, and `Tables' only lists that node's
+%% delayed-message tables: they are node-local. Every other node copies its
+%% own tables into its own Leveled store, with change tracking, through
+%% remote_init_to_khepri/1.
 -spec init_copy_to_khepri(StoreId, MigrationId, Tables) -> Ret when
+      StoreId :: khepri:store_id(),
+      MigrationId :: mnesia_to_khepri:migration_id(),
+      Tables :: [mnesia_to_khepri:mnesia_table()],
+      Ret :: {ok, Priv} | {error, any()},
+      Priv :: #?MODULE{}.
+init_copy_to_khepri(StoreId, MigrationId, Tables) ->
+    {ok, Priv} = init_copy_to_khepri(StoreId, MigrationId, Tables, no_fan_out),
+    case copy_on_other_nodes(StoreId) of
+        ok    -> {ok, Priv};
+        Error -> Error
+    end.
+
+%% Used for the copy of a single node's tables started by
+%% remote_init_to_khepri/1. `no_fan_out' prevents that copy from
+%% fanning out to the other nodes again.
+-spec init_copy_to_khepri(StoreId, MigrationId, Tables, no_fan_out) -> Ret when
       StoreId :: khepri:store_id(),
       MigrationId :: mnesia_to_khepri:migration_id(),
       Tables :: [mnesia_to_khepri:mnesia_table()],
       Ret :: {ok, Priv},
       Priv :: #?MODULE{}.
-init_copy_to_khepri(_StoreId, _MigrationId, Tables) ->
+init_copy_to_khepri(_StoreId, _MigrationId, Tables, no_fan_out) ->
     ?LOG_DEBUG(
        "Mnesia->Leveled init: tables ~0p",
        [Tables],
@@ -37,6 +62,46 @@ init_copy_to_khepri(_StoreId, _MigrationId, Tables) ->
     %% before calling setup() and resetting the timer.
     rabbit_delayed_message:await_khepri_and_setup(),
     {ok, #?MODULE{}}.
+
+-spec remote_init_to_khepri(StoreId) -> Ret when
+      StoreId :: khepri:store_id(),
+      Ret :: ok | {error, any()}.
+remote_init_to_khepri(StoreId) ->
+    Tables = rabbit_delayed_message_mnesia:table_names(),
+    MigrationId = <<"rabbit_delayed_message_",
+                    (atom_to_binary(node()))/binary>>,
+    ?LOG_INFO(
+       "Mnesia->Leveled data copy: copying local tables ~0p",
+       [Tables],
+       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
+    mnesia_to_khepri:copy_tables(StoreId, MigrationId, Tables,
+                                 {?MODULE, no_fan_out}).
+
+copy_on_other_nodes(StoreId) ->
+    case mnesia:system_info(db_nodes) -- [node()] of
+        [] ->
+            ok;
+        Nodes ->
+            ?LOG_INFO(
+               "Mnesia->Leveled data copy: copying delayed messages on "
+               "nodes ~0p",
+               [Nodes],
+               #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
+            Rets = erpc:multicall(Nodes, ?MODULE, remote_init_to_khepri,
+                                  [StoreId], infinity),
+            case [{Node, Ret}
+                  || {Node, Ret} <- lists:zip(Nodes, Rets),
+                     Ret =/= {ok, ok}] of
+                [] ->
+                    ok;
+                Failures ->
+                    ?LOG_ERROR(
+                       "Mnesia->Leveled data copy: failed on nodes: ~p",
+                       [Failures],
+                       #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
+                    {error, {delayed_message_copy_failed, Failures}}
+            end
+    end.
 
 -spec copy_to_khepri(Table, Record, State) -> Ret when
       Table :: mnesia_to_khepri:mnesia_table(),
