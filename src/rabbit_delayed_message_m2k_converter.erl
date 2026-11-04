@@ -23,6 +23,8 @@
 
 -export([rollback_local_copy/0]).
 
+-define(APP, rabbitmq_delayed_message_exchange).
+
 -record(?MODULE, {}).
 
 %% Entry point used by RabbitMQ's khepri_db migration. It only runs on the
@@ -57,12 +59,21 @@ init_copy_to_khepri(_StoreId, _MigrationId, Tables, no_fan_out) ->
        "Mnesia->Leveled init: tables ~0p",
        [Tables],
        #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN}),
-    rabbit_delayed_message_leveled:start_db(),
-    %% Signal the gen_server to switch to the leveled backend. The cast is
-    %% non-blocking; is_enabled/1 in the handler uses blocking mode and waits
-    %% until khepri_db is fully enabled (i.e. after all data has been copied)
-    %% before calling setup() and resetting the timer.
-    rabbit_delayed_message:await_khepri_and_setup(),
+    %% RabbitMQ loads disabled plugins to discover the tables to migrate, so
+    %% this also runs on a node where the plugin is disabled. That node has
+    %% nothing to copy and no gen_server to switch.
+    case rabbit_plugins:is_enabled(?APP) of
+        true ->
+            rabbit_delayed_message_leveled:start_db(),
+            %% Signal the gen_server to switch to the leveled backend. The
+            %% cast is non-blocking; is_enabled/1 in the handler uses blocking
+            %% mode and waits until khepri_db is fully enabled (i.e. after all
+            %% data has been copied) before calling setup() and resetting the
+            %% timer.
+            rabbit_delayed_message:await_khepri_and_setup();
+        false ->
+            ok
+    end,
     {ok, #?MODULE{}}.
 
 -spec remote_init_to_khepri(StoreId) -> Ret when
@@ -105,8 +116,11 @@ rollback_local_copy() ->
 local_migration_id() ->
     <<"rabbit_delayed_message_", (atom_to_binary(node()))/binary>>.
 
+%% Skips nodes where the plugin is disabled. Disabling it deletes the node's
+%% tables, unless the node was stopped at the time.
 copy_on_other_nodes(StoreId) ->
-    case mnesia:system_info(db_nodes) -- [node()] of
+    RunningNodes = rabbit_nodes:list_running(),
+    case rabbit_nodes:filter_with_plugin(?APP, RunningNodes) -- [node()] of
         [] ->
             ok;
         Nodes ->

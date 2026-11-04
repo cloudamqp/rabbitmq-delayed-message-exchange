@@ -25,7 +25,8 @@ all() ->
       {group, mnesia_to_khepri},
       {group, mnesia_to_khepri_slow},
       {group, mnesia_to_khepri_abort},
-      {group, mnesia_to_khepri_fanout_abort}
+      {group, mnesia_to_khepri_fanout_abort},
+      {group, mnesia_to_khepri_plugin_disabled}
     ].
 
 groups() ->
@@ -37,6 +38,7 @@ groups() ->
       {mnesia_to_khepri_slow, [], [mnesia_to_khepri_migration_slow]},
       {mnesia_to_khepri_abort, [], [mnesia_to_khepri_migration_abort]},
       {mnesia_to_khepri_fanout_abort, [], [mnesia_to_khepri_migration_fanout_abort]},
+      {mnesia_to_khepri_plugin_disabled, [], [mnesia_to_khepri_migration_plugin_disabled]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
@@ -142,6 +144,18 @@ init_per_group(mnesia_to_khepri_fanout_abort, Config) ->
         ]
     ),
     run_broker_and_clients(Config1);
+init_per_group(mnesia_to_khepri_plugin_disabled, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k-plugin-disabled")},
+            {rmq_nodes_count, ?M2K_NODES_COUNT},
+            {rmq_nodes_clustered, true},
+            {tcp_ports_base, 22400}
+        ]
+    ),
+    run_broker_and_clients(Config1);
 init_per_group(fine_stats, Config) ->
     CollectStatsOrig = get_collect_stats(Config),
     set_collect_stats(Config, fine),
@@ -161,6 +175,8 @@ end_per_group(mnesia_to_khepri_slow, Config) ->
 end_per_group(mnesia_to_khepri_abort, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(mnesia_to_khepri_fanout_abort, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(mnesia_to_khepri_plugin_disabled, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
@@ -861,6 +877,47 @@ mnesia_to_khepri_migration_fanout_abort(Config) ->
     assert_migration_rolled_back(Config),
     assert_delivered_once_on_mnesia(Config, Ex, Q, MsgsBefore).
 
+%% The plugin is disabled on one node. The migration must skip that node,
+%% whichever node runs the main data copy, and still migrate the others.
+mnesia_to_khepri_migration_plugin_disabled(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    [DisabledNode | EnabledNodes] = lists:reverse(node_indexes(Config)),
+    ok = rabbit_ct_broker_helpers:disable_plugin(
+           Config, DisabledNode, rabbitmq_delayed_message_exchange),
+
+    MsgsBefore = publish_confirmed_on_nodes(
+                   Config, EnabledNodes, Ex,
+                   fun(I) -> lists:duplicate(3, 30000 + I * 1000) end),
+
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
+
+    await_leveled_index_on_nodes(Config, EnabledNodes),
+    ?assertEqual(undefined,
+                 rabbit_ct_broker_helpers:rpc(
+                   Config, DisabledNode, persistent_term, get,
+                   [{rabbit_delayed_message_leveled, bookie}, undefined])),
+
+    MsgsAfter = publish_confirmed_on_nodes(
+                  Config, EnabledNodes, Ex, fun(I) -> [1000 + I * 100] end),
+
+    Msgs = MsgsBefore ++ MsgsAfter,
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+
+    {ok, Result} = consume(Chan2, Q, Msgs),
+    ?assertEqual(lists:sort(Msgs), lists:sort(Result)),
+
+    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
+    ok.
+
 %% Loads this suite on every broker node, so funs defined here can run there,
 %% then mocks the Mnesia->Leveled converter on every node with ExpectFun.
 %% Returns the PIDs of the mock owners; sending them `stop' unloads the mocks
@@ -955,6 +1012,9 @@ node_indexes(Config) ->
 %% confirms so the messages are stored before the call returns. Returns all
 %% published delays.
 publish_confirmed_on_each_node(Config, Ex, MsgsFun) ->
+    publish_confirmed_on_nodes(Config, node_indexes(Config), Ex, MsgsFun).
+
+publish_confirmed_on_nodes(Config, Nodes, Ex, MsgsFun) ->
     lists:flatmap(
       fun(I) ->
               Chan = rabbit_ct_client_helpers:open_channel(Config, I),
@@ -964,7 +1024,7 @@ publish_confirmed_on_each_node(Config, Ex, MsgsFun) ->
               amqp_channel:wait_for_confirms_or_die(Chan),
               rabbit_ct_client_helpers:close_channel(Chan),
               Msgs
-      end, node_indexes(Config)).
+      end, Nodes).
 
 %% Once khepri_db is enabled, every node must have switched its delayed message
 %% storage to Leveled, not only the node that ran the data copy. The timeout
@@ -972,11 +1032,14 @@ publish_confirmed_on_each_node(Config, Ex, MsgsFun) ->
 %% when such a timer fires on a node that never switched, the gen-server
 %% crashes and its restart sets up Leveled, hiding the missing switch.
 await_leveled_index_on_each_node(Config) ->
+    await_leveled_index_on_nodes(Config, node_indexes(Config)).
+
+await_leveled_index_on_nodes(Config, Nodes) ->
     [?awaitMatch({I, Tid} when Tid =/= undefined,
                  {I, rabbit_ct_broker_helpers:rpc(Config, I,
                                                   ets, whereis, [?LEVELED_INDEX_TABLE])},
                  10000)
-     || I <- node_indexes(Config)],
+     || I <- Nodes],
     ok.
 
 setup_fabric(Chan, ExDeclare, QueueDeclare) ->
