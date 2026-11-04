@@ -32,7 +32,7 @@
         ]).
 
 %% Internal exports for use by rabbit_delayed_message_m2k_converter
--export([start_db/0, destroy_db/0, internal_put/3]).
+-export([start_db/0, internal_put/3]).
 
 % --------------------------------------------
 % Storage
@@ -61,17 +61,6 @@ start_db() ->
     {ok, Bookie} = leveled_bookie:book_start(start_opts(Path)),
     ?BOOKIE(Bookie).
 
-%% Deletes the Leveled store. If the bookie is not running anymore (it is
-%% linked to the process which called start_db/0), its files are deleted
-%% directly.
-destroy_db() ->
-    case catch leveled_bookie:book_destroy(?BOOKIE) of
-        ok -> ok;
-        _  -> _ = rabbit_file:recursive_delete([db_path()])
-    end,
-    _ = persistent_term:erase({?MODULE, bookie}),
-    ok.
-
 db_path() ->
     filename:join([rabbit_plugins:user_provided_plugins_data_dir(),
                    "rabbit_delayed_message",
@@ -85,9 +74,17 @@ setup() ->
     start_db(),
     init_index_and_counters().
 
+%% Deletes the index and the Leveled store. If the bookie is not running
+%% anymore (it is linked to the process which called start_db/0), its files
+%% are deleted directly.
 disable_plugin() ->
     catch ets:delete(?INDEX_TABLE),
-    leveled_bookie:book_destroy(?BOOKIE).
+    case catch leveled_bookie:book_destroy(?BOOKIE) of
+        ok -> ok;
+        _  -> _ = rabbit_file:recursive_delete([db_path()])
+    end,
+    _ = persistent_term:erase({?MODULE, bookie}),
+    ok.
 
 messages_delayed(Exchange) ->
     case get_counter(exchange_to_counter_bin(Exchange)) of
