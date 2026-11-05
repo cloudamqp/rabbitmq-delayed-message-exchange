@@ -43,7 +43,7 @@ start_link() ->
 disable_plugin() ->
     rabbit_khepri:handle_fallback(
       #{mnesia => fun() -> rabbit_delayed_message_mnesia:disable_plugin() end,
-        khepri => fun() -> rabbit_delayed_message_leveled:disable_plugin() end}
+        khepri => fun() -> rabbit_delayed_message_leveled:destroy_db() end}
      ).
 
 -spec delay_message(rabbit_types:exchange(),

@@ -132,7 +132,7 @@ init_per_testcase(Testcase, Config) ->
 
 end_per_testcase(_Testcase, Config) ->
     Backend = backend(Config),
-    _ = Backend:disable_plugin(),
+    _ = teardown(Backend),
     ets:delete(?TIMINGS_TABLE),
     Config.
 
@@ -283,6 +283,11 @@ install_timing_wrappers(Backend) ->
 %% -------------------------------------------------------------------
 %% Helpers: store lifecycle
 %% -------------------------------------------------------------------
+
+teardown(rabbit_delayed_message_mnesia) ->
+    rabbit_delayed_message_mnesia:disable_plugin();
+teardown(rabbit_delayed_message_leveled) ->
+    rabbit_delayed_message_leveled:destroy_db().
 
 %% Clears all entries from the store between load-size runs.
 clear_store(rabbit_delayed_message_mnesia) ->

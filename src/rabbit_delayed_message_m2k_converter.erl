@@ -111,7 +111,7 @@ rollback_local_copy() ->
                [Reason],
                #{domain => ?KMM_M2K_TABLE_COPY_LOG_DOMAIN})
     end,
-    rabbit_delayed_message_leveled:disable_plugin().
+    rabbit_delayed_message_leveled:destroy_db().
 
 local_migration_id() ->
     <<"rabbit_delayed_message_", (atom_to_binary(node()))/binary>>.

@@ -19,7 +19,7 @@
 -define(INDEX_TABLE, rabbit_delayed_message_leveled_key_index).
 
 -export([setup/0,
-         disable_plugin/0,
+         destroy_db/0,
          messages_delayed/1,
          store_delay/3,
          get_first_delay/0,
@@ -70,18 +70,19 @@ setup() ->
     %% Close any bookie left open by the migration converter so there is at most
     %% one bookie at this path at a time. Errors are swallowed; the data is safe
     %% on disk via the leveled journal and will be recovered by book_start/1.
-    catch leveled_bookie:book_close(?BOOKIE),
+    try leveled_bookie:book_close(?BOOKIE) catch _:_ -> ok end,
     start_db(),
     init_index_and_counters().
 
 %% Deletes the index and the Leveled store. If the bookie is not running
 %% anymore (it is linked to the process which called start_db/0), its files
 %% are deleted directly.
-disable_plugin() ->
-    catch ets:delete(?INDEX_TABLE),
-    case catch leveled_bookie:book_destroy(?BOOKIE) of
-        ok -> ok;
-        _  -> _ = rabbit_file:recursive_delete([db_path()])
+destroy_db() ->
+    try ets:delete(?INDEX_TABLE) catch error:badarg -> ok end,
+    try
+        ok = leveled_bookie:book_destroy(?BOOKIE)
+    catch
+        _:_ -> _ = rabbit_file:recursive_delete([db_path()])
     end,
     _ = persistent_term:erase({?MODULE, bookie}),
     ok.
