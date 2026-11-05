@@ -13,12 +13,20 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
+%% The Mnesia->Khepri migration copies data on a single node only, so the
+%% migration groups need a cluster to cover the nodes that do not run it.
+-define(M2K_NODES_COUNT, 3).
+-define(LEVELED_INDEX_TABLE, rabbit_delayed_message_leveled_key_index).
+
 all() ->
     [
       {group, mnesia},
       {group, leveled},
       {group, mnesia_to_khepri},
-      {group, mnesia_to_khepri_slow}
+      {group, mnesia_to_khepri_slow},
+      {group, mnesia_to_khepri_abort},
+      {group, mnesia_to_khepri_fanout_abort},
+      {group, mnesia_to_khepri_plugin_disabled}
     ].
 
 groups() ->
@@ -28,6 +36,9 @@ groups() ->
       {leveled_only, [], [disable_cleanup]},
       {mnesia_to_khepri, [], [mnesia_to_khepri_migration]},
       {mnesia_to_khepri_slow, [], [mnesia_to_khepri_migration_slow]},
+      {mnesia_to_khepri_abort, [], [mnesia_to_khepri_migration_abort]},
+      {mnesia_to_khepri_fanout_abort, [], [mnesia_to_khepri_migration_fanout_abort]},
+      {mnesia_to_khepri_plugin_disabled, [], [mnesia_to_khepri_migration_plugin_disabled]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
@@ -89,6 +100,8 @@ init_per_group(mnesia_to_khepri, Config) ->
         [
             {metadata_store, mnesia},
             {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k")},
+            {rmq_nodes_count, ?M2K_NODES_COUNT},
+            {rmq_nodes_clustered, true},
             {tcp_ports_base, 21200}
         ]
     ),
@@ -99,7 +112,47 @@ init_per_group(mnesia_to_khepri_slow, Config) ->
         [
             {metadata_store, mnesia},
             {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k-slow")},
-            {tcp_ports_base, 21300}
+            {rmq_nodes_count, ?M2K_NODES_COUNT},
+            {rmq_nodes_clustered, true},
+            %% Each node reserves 72 ports; keep clear of the `mnesia_to_khepri'
+            %% group's three nodes starting at 21200.
+            {tcp_ports_base, 21500}
+        ]
+    ),
+    run_broker_and_clients(Config1);
+init_per_group(mnesia_to_khepri_abort, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k-abort")},
+            {rmq_nodes_count, ?M2K_NODES_COUNT},
+            {rmq_nodes_clustered, true},
+            {tcp_ports_base, 21800}
+        ]
+    ),
+    run_broker_and_clients(Config1);
+init_per_group(mnesia_to_khepri_fanout_abort, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k-fanout-abort")},
+            {rmq_nodes_count, ?M2K_NODES_COUNT},
+            {rmq_nodes_clustered, true},
+            {tcp_ports_base, 22100}
+        ]
+    ),
+    run_broker_and_clients(Config1);
+init_per_group(mnesia_to_khepri_plugin_disabled, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, mnesia},
+            {rmq_nodename_suffix, rabbit_delayed_message_mnesia:append_to_atom(?MODULE, "-m2k-plugin-disabled")},
+            {rmq_nodes_count, ?M2K_NODES_COUNT},
+            {rmq_nodes_clustered, true},
+            {tcp_ports_base, 22400}
         ]
     ),
     run_broker_and_clients(Config1);
@@ -118,6 +171,12 @@ end_per_group(leveled, Config) ->
 end_per_group(mnesia_to_khepri, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(mnesia_to_khepri_slow, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(mnesia_to_khepri_abort, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(mnesia_to_khepri_fanout_abort, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(mnesia_to_khepri_plugin_disabled, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
@@ -548,6 +607,11 @@ string_delay_header(Config) ->
 
     ok.
 
+%% The plugin's Mnesia tables are node-local and the Mnesia->Khepri data copy
+%% runs on a single node, while every other node only sees "data copy already
+%% in progress". Delayed messages are therefore published through every node
+%% before the migration, and every node must be able to delay messages with
+%% Leveled after it.
 mnesia_to_khepri_migration(Config) ->
     Chan = rabbit_ct_client_helpers:open_channel(Config),
 
@@ -557,32 +621,38 @@ mnesia_to_khepri_migration(Config) ->
     setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
                  make_durable_queue(Q)),
 
-    %% Use publisher confirms to ensure messages are persisted in Mnesia
-    %% before triggering the migration.
-    amqp_channel:call(Chan, #'confirm.select'{}),
-
     %% Publish messages with a delay long enough to survive the migration
-    %% and node restart regardless of how quickly those steps complete.
-    Msgs = [30000, 30000, 30000],
-    publish_messages(Chan, Ex, Msgs),
-    amqp_channel:wait_for_confirms_or_die(Chan),
+    %% regardless of how quickly it completes. Each node gets its own delay
+    %% value so a missing message points at the node that lost it.
+    MsgsBefore = publish_confirmed_on_each_node(
+                   Config, Ex,
+                   fun(I) -> lists:duplicate(3, 30000 + I * 1000) end),
 
     %% Enable khepri_db, which runs the Mnesia-to-Leveled migration for the
     %% delayed-message tables via rabbit_delayed_message_m2k_converter.
     ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
 
+    await_leveled_index_on_each_node(Config),
+
+    %% Delaying a message after the migration needs the Leveled backend to
+    %% be set up on the node receiving the publish.
+    MsgsAfter = publish_confirmed_on_each_node(
+                  Config, Ex, fun(I) -> [1000 + I * 100] end),
+
+    Msgs = MsgsBefore ++ MsgsAfter,
     Chan2 = rabbit_ct_client_helpers:open_channel(Config),
 
     {ok, Result} = consume(Chan2, Q, Msgs),
-    Sorted = lists:sort(Msgs),
-    ?assertEqual(Sorted, Result),
+    ?assertEqual(lists:sort(Msgs), lists:sort(Result)),
 
-    ?assertEqual(undefined,
-                 rabbit_ct_broker_helpers:rpc(Config, 0,
-                     rabbit_delayed_message_leveled, get_first_delay, [])),
-    ?assertEqual([],
-                 rabbit_ct_broker_helpers:rpc(Config, 0,
-                     rabbit_delayed_message_leveled, list_all_keys, [])),
+    [begin
+         ?assertEqual(undefined,
+                      rabbit_ct_broker_helpers:rpc(Config, I,
+                          rabbit_delayed_message_leveled, get_first_delay, [])),
+         ?assertEqual([],
+                      rabbit_ct_broker_helpers:rpc(Config, I,
+                          rabbit_delayed_message_leveled, list_all_keys, []))
+     end || I <- node_indexes(Config)],
 
     amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
     amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
@@ -592,7 +662,7 @@ mnesia_to_khepri_migration(Config) ->
 %% Exercises the race where the rabbit_delayed_message gen-server processes the
 %% await_khepri_and_setup cast while khepri_db is still state_changing (i.e.
 %% copy_to_khepri is still running). The test slows down each copy_to_khepri
-%% call by 1 s, giving the gen-server plenty of time to receive and process the
+%% call by 3 s, giving the gen-server plenty of time to receive and process the
 %% cast before migration finishes. Two invariants are checked:
 %%
 %%   1. The leveled ETS index does NOT exist while copy_to_khepri runs —
@@ -604,6 +674,9 @@ mnesia_to_khepri_migration(Config) ->
 %% If setup() were called unconditionally (or with a non-blocking is_enabled
 %% that returned false during state_changing and bypassed setup entirely),
 %% invariant 1 or 2 would be violated and the test would fail.
+%%
+%% Which node runs the data copy is not deterministic, so copy_to_khepri is
+%% mocked on every node of the cluster.
 mnesia_to_khepri_migration_slow(Config) ->
     Chan = rabbit_ct_client_helpers:open_channel(Config),
 
@@ -613,69 +686,360 @@ mnesia_to_khepri_migration_slow(Config) ->
     setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
                  make_durable_queue(Q)),
 
-    amqp_channel:call(Chan, #'confirm.select'{}),
-
     MsgCount = 3,
     %% 10 s delay: messages stay pending throughout the ~MsgCount-second migration.
-    Msgs = lists:duplicate(MsgCount, 10000),
-    publish_messages(Chan, Ex, Msgs),
-    amqp_channel:wait_for_confirms_or_die(Chan),
+    MsgsBefore = publish_confirmed_on_each_node(
+                   Config, Ex,
+                   fun(I) -> lists:duplicate(MsgCount, 10000 + I * 100) end),
 
-    %% plugin_SUITE is not in the broker node's code path, so any lambda that
+    %% plugin_SUITE is not in the broker nodes' code path, so any lambda that
     %% carries a plugin_SUITE module reference crashes with {undef,...} when
     %% executed there. Load the beam explicitly before spawning.
     SuiteBeamFile = code:which(plugin_SUITE),
     {ok, SuiteBeam} = file:read_file(SuiteBeamFile),
-    {module, plugin_SUITE} = rabbit_ct_broker_helpers:rpc(Config, 0, code, load_binary,
-             [plugin_SUITE, SuiteBeamFile, SuiteBeam]),
+    [{module, plugin_SUITE} = R
+     || R <- rabbit_ct_broker_helpers:rpc_all(Config, code, load_binary,
+                                              [plugin_SUITE, SuiteBeamFile, SuiteBeam])],
 
     TestPid = self(),
-    MockOwnerPid = rabbit_ct_broker_helpers:rpc(Config, 0, erlang, spawn,
-        [fun() ->
-            ok = meck:new(rabbit_delayed_message_m2k_converter, [passthrough]),
-            %% Sleep 1 s per record so the gen-server must block for several
-            %% seconds inside is_enabled(khepri_db, blocking). During those
-            %% sleeps the ETS index must not yet exist (invariant 1).
-            ok = meck:expect(rabbit_delayed_message_m2k_converter, copy_to_khepri,
-                fun(Table, Record, State) ->
-                    case ets:whereis(rabbit_delayed_message_leveled_key_index) of
-                        undefined -> ok;
-                        _         -> TestPid ! setup_called_too_early
-                    end,
-                    Res = meck:passthrough([Table, Record, State]),
-                    timer:sleep(3000),
-                    Res
-                end),
-            TestPid ! meck_ready,
-            receive stop -> meck:unload(rabbit_delayed_message_m2k_converter) end
-        end]),
-    receive
-        meck_ready -> ok
-    after 5000 ->
-        error(meck_owner_did_not_start)
-    end,
+    MockOwnerPids =
+        [rabbit_ct_broker_helpers:rpc(Config, I, erlang, spawn,
+            [fun() ->
+                ok = meck:new(rabbit_delayed_message_m2k_converter, [passthrough]),
+                %% Sleep 3 s per record so the gen-server must block for several
+                %% seconds inside is_enabled(khepri_db, blocking). During those
+                %% sleeps the ETS index must not yet exist (invariant 1).
+                ok = meck:expect(rabbit_delayed_message_m2k_converter, copy_to_khepri,
+                    fun(Table, Record, State) ->
+                        case ets:whereis(?LEVELED_INDEX_TABLE) of
+                            undefined -> ok;
+                            _         -> TestPid ! {setup_called_too_early, node()}
+                        end,
+                        Res = meck:passthrough([Table, Record, State]),
+                        timer:sleep(3000),
+                        Res
+                    end),
+                TestPid ! {meck_ready, self()},
+                receive stop -> meck:unload(rabbit_delayed_message_m2k_converter) end
+            end])
+         || I <- node_indexes(Config)],
+    [receive
+         {meck_ready, Pid} -> ok
+     after 5000 ->
+         error({meck_owner_did_not_start, Pid})
+     end || Pid <- MockOwnerPids],
     ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
 
-    MockOwnerPid ! stop,
+    [Pid ! stop || Pid <- MockOwnerPids],
 
     %% Invariant 1: setup() must not have fired during copy_to_khepri.
     receive
-        setup_called_too_early -> error(setup_called_too_early)
+        {setup_called_too_early, Node} -> error({setup_called_too_early, Node})
     after 0 -> ok
     end,
+
+    await_leveled_index_on_each_node(Config),
+
     timer:sleep(30000),
 
     % Invariant 2: every delayed message must be in the ETS index.
     % - Not checking Invariant 2 here, too complex -
 
+    MsgsAfter = publish_confirmed_on_each_node(
+                  Config, Ex, fun(I) -> [1000 + I * 100] end),
+
+    Msgs = MsgsBefore ++ MsgsAfter,
     Chan2 = rabbit_ct_client_helpers:open_channel(Config),
 
     {ok, Result} = consume(Chan2, Q, Msgs),
-    ?assertEqual(lists:sort(Msgs), Result),
+    ?assertEqual(lists:sort(Msgs), lists:sort(Result)),
 
     amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
     amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
     rabbit_ct_client_helpers:close_channel(Chan2),
+    ok.
+
+%% The migration is aborted after the nodes not running the main data copy
+%% copied their own tables: copy_to_khepri/3 fails on the node which ran
+%% init_copy_to_khepri/3, and that node only copies its own records once the
+%% other nodes are done. Every node must then be back on Mnesia, with its
+%% tables writable and its Leveled store destroyed, and deliver every delayed
+%% message exactly once.
+mnesia_to_khepri_migration_abort(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    MsgsBefore = publish_confirmed_on_each_node(
+                   Config, Ex,
+                   fun(I) -> lists:duplicate(3, 20000 + I * 1000) end),
+
+    MainCopyKey = {?MODULE, main_copy},
+    MockOwnerPids = mock_converter_on_each_node(
+        Config,
+        fun(Converter) ->
+            ok = meck:expect(Converter, init_copy_to_khepri,
+                fun(StoreId, MigrationId, Tables) ->
+                    persistent_term:put(MainCopyKey, true),
+                    meck:passthrough([StoreId, MigrationId, Tables])
+                end),
+            ok = meck:expect(Converter, copy_to_khepri,
+                fun(Table, Record, State) ->
+                    case persistent_term:get(MainCopyKey, false) of
+                        true  -> {error, injected_failure};
+                        false -> meck:passthrough([Table, Record, State])
+                    end
+                end)
+        end,
+        [MainCopyKey]),
+
+    ?assertMatch({error, _},
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags,
+                                              enable, [khepri_db])),
+    [Pid ! stop || Pid <- MockOwnerPids],
+
+    assert_migration_rolled_back(Config),
+    assert_delivered_once_on_mnesia(Config, Ex, Q, MsgsBefore).
+
+%% Only one of the nodes not running the main data copy fails to copy its own
+%% tables, while the other one succeeds. Which node runs the main copy is not
+%% deterministic, so that node picks the failing one when it fans out. Every
+%% node must roll back, including the one whose copy succeeded.
+mnesia_to_khepri_migration_fanout_abort(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    MsgsBefore = publish_confirmed_on_each_node(
+                   Config, Ex,
+                   fun(I) -> lists:duplicate(3, 20000 + I * 1000) end),
+
+    TestPid = self(),
+    MainCopyKey = {?MODULE, main_copy},
+    FailingNodeKey = {?MODULE, failing_node},
+    MockOwnerPids = mock_converter_on_each_node(
+        Config,
+        fun(Converter) ->
+            ok = meck:expect(Converter, init_copy_to_khepri,
+                fun(StoreId, MigrationId, Tables) ->
+                    persistent_term:put(MainCopyKey, true),
+                    %% Only the first node running the main copy picks the
+                    %% failing node. Nodes taking over the main copy after it
+                    %% failed keep that choice.
+                    case persistent_term:get(FailingNodeKey, undefined) of
+                        undefined ->
+                            Nodes = mnesia:system_info(db_nodes),
+                            FailingNode = hd(lists:sort(Nodes -- [node()])),
+                            [ok = erpc:call(N, persistent_term, put,
+                                            [FailingNodeKey, FailingNode])
+                             || N <- Nodes],
+                            TestPid ! {failing_node, node(), FailingNode};
+                        _ ->
+                            ok
+                    end,
+                    meck:passthrough([StoreId, MigrationId, Tables])
+                end),
+            ok = meck:expect(Converter, copy_to_khepri,
+                fun(Table, Record, State) ->
+                    IsFailingNode =
+                        persistent_term:get(FailingNodeKey, undefined) =:= node(),
+                    IsMainCopy = persistent_term:get(MainCopyKey, false),
+                    case IsFailingNode andalso not IsMainCopy of
+                        true  -> {error, injected_failure};
+                        false -> meck:passthrough([Table, Record, State])
+                    end
+                end)
+        end,
+        [MainCopyKey, FailingNodeKey]),
+
+    ?assertMatch({error, _},
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags,
+                                              enable, [khepri_db])),
+    [Pid ! stop || Pid <- MockOwnerPids],
+
+    receive
+        {failing_node, MainCopyNode, FailingNode} ->
+            ct:pal("Main copy on ~s, local copy failing on ~s",
+                   [MainCopyNode, FailingNode]),
+            ?assertNotEqual(MainCopyNode, FailingNode)
+    after 0 ->
+        error(no_failing_node_picked)
+    end,
+
+    assert_migration_rolled_back(Config),
+    assert_delivered_once_on_mnesia(Config, Ex, Q, MsgsBefore).
+
+%% The plugin is disabled on one node. The migration must skip that node,
+%% whichever node runs the main data copy, and still migrate the others.
+mnesia_to_khepri_migration_plugin_disabled(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    [DisabledNode | EnabledNodes] = lists:reverse(node_indexes(Config)),
+    ok = rabbit_ct_broker_helpers:disable_plugin(
+           Config, DisabledNode, rabbitmq_delayed_message_exchange),
+
+    MsgsBefore = publish_confirmed_on_nodes(
+                   Config, EnabledNodes, Ex,
+                   fun(I) -> lists:duplicate(3, 30000 + I * 1000) end),
+
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_feature_flags, enable, [khepri_db]),
+
+    await_leveled_index_on_nodes(Config, EnabledNodes),
+    ?assertEqual(undefined,
+                 rabbit_ct_broker_helpers:rpc(
+                   Config, DisabledNode, persistent_term, get,
+                   [{rabbit_delayed_message_leveled, bookie}, undefined])),
+
+    MsgsAfter = publish_confirmed_on_nodes(
+                  Config, EnabledNodes, Ex, fun(I) -> [1000 + I * 100] end),
+
+    Msgs = MsgsBefore ++ MsgsAfter,
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+
+    {ok, Result} = consume(Chan2, Q, Msgs),
+    ?assertEqual(lists:sort(Msgs), lists:sort(Result)),
+
+    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
+    ok.
+
+%% Loads this suite on every broker node, so funs defined here can run there,
+%% then mocks the Mnesia->Leveled converter on every node with ExpectFun.
+%% Returns the PIDs of the mock owners; sending them `stop' unloads the mocks
+%% and erases the persistent terms in Keys.
+mock_converter_on_each_node(Config, ExpectFun, Keys) ->
+    SuiteBeamFile = code:which(?MODULE),
+    {ok, SuiteBeam} = file:read_file(SuiteBeamFile),
+    [{module, ?MODULE} = R
+     || R <- rabbit_ct_broker_helpers:rpc_all(Config, code, load_binary,
+                                              [?MODULE, SuiteBeamFile, SuiteBeam])],
+    TestPid = self(),
+    Converter = rabbit_delayed_message_m2k_converter,
+    MockOwnerPids =
+        [rabbit_ct_broker_helpers:rpc(Config, I, erlang, spawn,
+            [fun() ->
+                ok = meck:new(Converter, [passthrough]),
+                ExpectFun(Converter),
+                TestPid ! {meck_ready, self()},
+                receive stop -> ok end,
+                [_ = persistent_term:erase(Key) || Key <- Keys],
+                meck:unload(Converter)
+            end])
+         || I <- node_indexes(Config)],
+    [receive
+         {meck_ready, Pid} -> ok
+     after 5000 ->
+         error({meck_owner_did_not_start, Pid})
+     end || Pid <- MockOwnerPids],
+    MockOwnerPids.
+
+%% After an aborted migration, every node must be back on Mnesia: khepri_db
+%% disabled, its own table copy rolled back, its tables writable and its
+%% Leveled store destroyed.
+assert_migration_rolled_back(Config) ->
+    StoreId = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_khepri,
+                                           get_store_id, []),
+    [begin
+         ?assertNot(rabbit_ct_broker_helpers:rpc(Config, I, rabbit_feature_flags,
+                                                 is_enabled, [khepri_db])),
+         %% The rollback runs asynchronously in the rabbit_delayed_message
+         %% gen-server once it sees the feature flag disabled. It destroys the
+         %% Leveled store last.
+         ?awaitMatch({I, undefined},
+                     {I, rabbit_ct_broker_helpers:rpc(
+                           Config, I, persistent_term, get,
+                           [{rabbit_delayed_message_leveled, bookie}, undefined])},
+                     10000),
+         Node = rabbit_ct_broker_helpers:get_node_config(Config, I, nodename),
+         LocalMigrationId = <<"rabbit_delayed_message_",
+                              (atom_to_binary(Node))/binary>>,
+         ?assertNotEqual({I, true},
+                         {I, rabbit_ct_broker_helpers:rpc(
+                               Config, I, mnesia_to_khepri, is_migration_finished,
+                               [StoreId, LocalMigrationId])}),
+         [?assertEqual({I, T, read_write},
+                       {I, T, rabbit_ct_broker_helpers:rpc(
+                                Config, I, mnesia, table_info, [T, access_mode])})
+          || T <- rabbit_ct_broker_helpers:rpc(
+                    Config, I, rabbit_delayed_message_mnesia, table_names, [])]
+     end || I <- node_indexes(Config)],
+    ok.
+
+%% Delayed messages must still go through Mnesia on every node, and every
+%% message published before or after the aborted migration must be delivered
+%% exactly once.
+assert_delivered_once_on_mnesia(Config, Ex, Q, MsgsBefore) ->
+    MsgsAfter = publish_confirmed_on_each_node(
+                  Config, Ex, fun(I) -> [1000 + I * 100] end),
+
+    Msgs = MsgsBefore ++ MsgsAfter,
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    {ok, Result} = consume(Chan, Q, Msgs),
+    ?assertEqual(lists:sort(Msgs), lists:sort(Result)),
+    receive
+        {#'basic.deliver'{}, #amqp_msg{payload = Bin}} ->
+            error({unexpected_delivery, binary_to_term(Bin)})
+    after 3000 ->
+        ok
+    end,
+
+    amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+node_indexes(Config) ->
+    Nodes = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    lists:seq(0, length(Nodes) - 1).
+
+%% Publishes MsgsFun(I) through node I, for every node, using publisher
+%% confirms so the messages are stored before the call returns. Returns all
+%% published delays.
+publish_confirmed_on_each_node(Config, Ex, MsgsFun) ->
+    publish_confirmed_on_nodes(Config, node_indexes(Config), Ex, MsgsFun).
+
+publish_confirmed_on_nodes(Config, Nodes, Ex, MsgsFun) ->
+    lists:flatmap(
+      fun(I) ->
+              Chan = rabbit_ct_client_helpers:open_channel(Config, I),
+              #'confirm.select_ok'{} = amqp_channel:call(Chan, #'confirm.select'{}),
+              Msgs = MsgsFun(I),
+              publish_messages(Chan, Ex, Msgs),
+              amqp_channel:wait_for_confirms_or_die(Chan),
+              rabbit_ct_client_helpers:close_channel(Chan),
+              Msgs
+      end, Nodes).
+
+%% Once khepri_db is enabled, every node must have switched its delayed message
+%% storage to Leveled, not only the node that ran the data copy. The timeout
+%% must stay well below the delay of messages published before the migration:
+%% when such a timer fires on a node that never switched, the gen-server
+%% crashes and its restart sets up Leveled, hiding the missing switch.
+await_leveled_index_on_each_node(Config) ->
+    await_leveled_index_on_nodes(Config, node_indexes(Config)).
+
+await_leveled_index_on_nodes(Config, Nodes) ->
+    [?awaitMatch({I, Tid} when Tid =/= undefined,
+                 {I, rabbit_ct_broker_helpers:rpc(Config, I,
+                                                  ets, whereis, [?LEVELED_INDEX_TABLE])},
+                 10000)
+     || I <- Nodes],
     ok.
 
 setup_fabric(Chan, ExDeclare, QueueDeclare) ->
