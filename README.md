@@ -208,12 +208,27 @@ PROJECT_VERSION=4.2.6 PRODUCT_VERSION=4.2.6 VERSION=4.2.6 \
 
 The EZ file is created in the `plugins` directory.
 
+By default the plugin takes its version from `RABBITMQ_VERSION`. Set
+`PLUGIN_VERSION` to give the plugin its own version while still building
+against that RabbitMQ release:
+
+```shell
+gmake dist PLUGIN_VERSION=v4.2.7 DIST_AS_EZS=true
+```
+
 ## Creating a Release
 
-1. Update `RABBITMQ_VERSION` in `Makefile` to the target RabbitMQ release (e.g. `v4.2.6`)
-1. Update `broker_version_requirements` in the `PROJECT_APP_EXTRA_KEYS` block of `Makefile` to match
-1. Push a tag (i.e. `v4.2.6`) with the matching version
-1. The Package workflow (`.github/workflows/package.yml`) builds the `.ez` artifacts on push
+The plugin version and the RabbitMQ version it builds against are separate.
+`RABBITMQ_VERSION` and `broker_version_requirements` in the `Makefile` set the
+oldest RabbitMQ release the plugin runs on; the release tag sets the plugin
+version.
+
+1. Only when the plugin needs a newer RabbitMQ: update `RABBITMQ_VERSION` in
+   `Makefile`, `broker_version_requirements` in its `PROJECT_APP_EXTRA_KEYS`
+   block, and the RabbitMQ `ref` in `.github/workflows/package.yml` and
+   `.github/workflows/test.yml`
+1. Push a tag (e.g. `v4.2.7`). The Package workflow (`.github/workflows/package.yml`)
+   builds the `.ez` artifacts with the tag as the plugin version
 1. Attach the produced `rabbitmq_delayed_message_exchange*.ez` and `leveled*.ez` files to a GitHub release
 
 ## LICENSE

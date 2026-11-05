@@ -43,6 +43,15 @@ ERLANG_MK_REPO = https://github.com/rabbitmq/erlang.mk.git
 ERLANG_MK_COMMIT = rabbitmq-tmp
 
 include rabbitmq-components.mk
+
+# Overrides the version of this plugin only, so a release can be versioned
+# independently of the RabbitMQ version it builds against. Passing
+# PROJECT_VERSION on the command line would also apply to every dependency
+# built by a sub-make.
+ifneq ($(PLUGIN_VERSION),)
+PROJECT_VERSION := $(PLUGIN_VERSION)
+endif
+
 include erlang.mk
 
 # Strip lz4 and zstd from leveled's OTP application list. Patching the source
