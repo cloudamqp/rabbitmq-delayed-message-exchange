@@ -33,7 +33,7 @@ groups() ->
     [
       {mnesia, [], [{group, non_parallel_tests}, {group, fine_stats}]},
       {leveled, [], [{group, non_parallel_tests}, {group, fine_stats}, {group, leveled_only}]},
-      {leveled_only, [], [disable_cleanup]},
+      {leveled_only, [], [disable_cleanup, disable_resets_counters]},
       {mnesia_to_khepri, [], [mnesia_to_khepri_migration]},
       {mnesia_to_khepri_slow, [], [mnesia_to_khepri_migration_slow]},
       {mnesia_to_khepri_abort, [], [mnesia_to_khepri_migration_abort]},
@@ -303,6 +303,33 @@ disable_cleanup(Config) ->
            Config, 0, rabbitmq_delayed_message_exchange),
     ?awaitMatch(T when T =/= undefined, EtsWhereis(Trie), 5000),
     ?awaitMatch(T when T =/= undefined, EtsWhereis(LeveledIndex), 10000),
+    ok.
+
+%% Disabling the plugin destroys the delayed messages, so a re-enabled plugin
+%% must not report their counts for an exchange that outlived the disable.
+disable_resets_counters(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    amqp_channel:call(Chan, #'confirm.select'{}),
+    publish_messages(Chan, Ex, lists:duplicate(3, 60000)),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ?awaitMatch(3, messages_delayed(Config, Ex), 5000),
+
+    ok = rabbit_ct_broker_helpers:disable_plugin(
+           Config, 0, rabbitmq_delayed_message_exchange),
+    ok = rabbit_ct_broker_helpers:enable_plugin(
+           Config, 0, rabbitmq_delayed_message_exchange),
+    ?awaitMatch(0, messages_delayed(Config, Ex), 10000),
+
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
     ok.
 
 %% Regression: removing a topic binding must also remove it from the
@@ -1154,6 +1181,14 @@ make_queue_name(Config, Suffix) ->
 make_policy_name(Config, Suffix) ->
     B = rabbit_ct_helpers:get_config(Config, test_resource_name),
     erlang:list_to_binary("p-" ++ B ++ "-" ++ Suffix).
+
+messages_delayed(Config, Ex) ->
+    XName = rabbit_misc:r(<<"/">>, exchange, Ex),
+    {ok, X} = rabbit_ct_broker_helpers:rpc(Config, 0,
+                                           rabbit_exchange, lookup, [XName]),
+    proplists:get_value(
+      messages_delayed,
+      rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_exchange, info, [X])).
 
 get_publish_out_stat(Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, ets, tab2list, [channel_queue_exchange_metrics]).
