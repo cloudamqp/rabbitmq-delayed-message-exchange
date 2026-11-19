@@ -19,10 +19,13 @@ jobs:
         include:
         - erlang_version: "27"
           elixir_version: "1.18.x"
-          rabbitmq_version: "v4.3.3"
+          rabbitmq_version: "v4.4.1"
         - erlang_version: "28"
           elixir_version: "1.19.x"
-          rabbitmq_version: "v4.3.3"
+          rabbitmq_version: "v4.4.1"
+        - erlang_version: "29"
+          elixir_version: "1.20.x"
+          rabbitmq_version: "v4.4.1"
 
     steps:
       - name: Checkout RabbitMQ Server
