@@ -16,6 +16,7 @@
 -export([setup/0,
          teardown/0,
          id/1,
+         id_to_exchange_name/1,
          init/3,
          add/2,
          sub/2,

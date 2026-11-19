@@ -244,6 +244,38 @@ different exchange type, like `"topic"` for example. You can also
 specify exchange types provided by plugins. Note that this argument is
 **required** and **must** refer to an **existing exchange type**.
 
+## Blocking the Routing of an Exchange
+
+An exchange can be **blocked**: while blocked, it keeps accepting publishes, but
+it routes nothing. Messages whose delay expires stay stored, and so do messages
+published without a delay. Unblocking the exchange routes every kept message to
+the queues bound at that time, in delay order, and routing goes back to normal.
+
+This is an Erlang API, callable with `rabbitmqctl eval`:
+
+``` bash
+# block exchange "my-exchange" in vhost "/"
+rabbitmqctl eval 'rabbit_delayed_message_block:block(<<"/">>, <<"my-exchange">>).'
+
+# unblock it
+rabbitmqctl eval 'rabbit_delayed_message_block:unblock(<<"/">>, <<"my-exchange">>).'
+
+# list blocked exchanges
+rabbitmqctl eval 'rabbit_delayed_message_block:list().'
+```
+
+`block/1`, `unblock/1` and `is_blocked/1` also take an exchange name record
+(`#resource{}`). `block` returns `{error, not_found}` for a missing exchange and
+`{error, not_delayed_exchange}` for an exchange of another type.
+
+Things to know:
+
+ * blocks are stored in the metadata store (Khepri): they apply to the whole
+   cluster and survive restarts, and so do the kept messages
+ * kept messages still count in `messages_delayed` and in the Prometheus metrics
+ * deleting the exchange removes its block; its kept messages are dropped, like
+   any other delayed message of a deleted exchange
+
 ## Performance Impact ##
 
 Due to the `"x-delayed-type"` argument, one could use this exchange in

@@ -23,6 +23,7 @@
          disable_plugin/0,
          delay_message/3,
          exchange_deleted/1,
+         exchange_unblocked/1,
          messages_delayed/1,
          bytes_delayed/1
         ]).
@@ -72,6 +73,16 @@ exchange_deleted(Exchange) ->
          || Node <- rabbit_nodes:list_running()],
     ok.
 
+%% Asks this node's server to route the messages it kept for the exchange
+%% while it was blocked. Called on every node by the Khepri projection of
+%% rabbit_delayed_message_block, so it stays local, and cheap: it runs in the
+%% Khepri state machine. The cast is dropped if the server is not running.
+-spec exchange_unblocked(rabbit_exchange:name()) -> ok.
+exchange_unblocked(XName) ->
+    gen_server:cast(?MODULE,
+                    {exchange_unblocked,
+                     rabbit_delayed_message_counters:id(XName)}).
+
 messages_delayed(Exchange) ->
     rabbit_delayed_message_counters:messages_delayed(Exchange).
 
@@ -112,18 +123,31 @@ handle_call(_Req, _From, State) ->
     {reply, unknown_request, State}.
 
 handle_cast({exchange_deleted, Id}, State) ->
+    %% Messages the exchange kept while blocked are routed (to nowhere, the
+    %% bindings are gone) and deleted like any other message of a deleted
+    %% exchange.
+    State1 = release(Id, State),
     ok = rabbit_delayed_message_counters:forget(Id),
-    {noreply, State};
+    {noreply, State1};
+handle_cast({exchange_unblocked, Id}, State) ->
+    {noreply, release(Id, State)};
 handle_cast(_C, State) ->
     {noreply, State}.
 
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
-    case get_many(Key) of
-        [] ->
-            delete_empty_key(Key);
-        Deliveries ->
-            _ = route(Deliveries, State),
-            delete(Key)
+    case is_blocked(Key) of
+        true ->
+            %% The exchange is blocked: keep the message aside, it is
+            %% routed once the exchange is unblocked.
+            hold(Key);
+        false ->
+            case get_many(Key) of
+                [] ->
+                    delete_empty_key(Key);
+                Deliveries ->
+                    _ = route(Deliveries, State),
+                    delete(Key)
+            end
     end,
     {noreply, State#state{timer = maybe_delay_first()}};
 handle_info({timeout, TRef, compact_journal},
@@ -171,6 +195,36 @@ get_first_delay() ->
 
 delete_empty_key(Key) ->
     rabbit_delayed_message_leveled:delete_empty_key(Key).
+
+is_blocked(Key) ->
+    case rabbit_delayed_message_leveled:exchange_id(Key) of
+        undefined ->
+            false;
+        Id ->
+            rabbit_delayed_message_block:is_blocked(
+              rabbit_delayed_message_counters:id_to_exchange_name(Id))
+    end.
+
+hold(Key) ->
+    rabbit_delayed_message_leveled:hold(Key).
+
+%% Puts the messages the exchange kept while blocked back in line. They are all expired, so
+%% the timer is restarted to fire right away and route them.
+release(Id, State = #state{timer = CurrTimer}) ->
+    case rabbit_delayed_message_leveled:release(Id) of
+        0 ->
+            State;
+        N ->
+            ?LOG_DEBUG("Delayed message exchange: releasing ~b held "
+                       "messages of ~ts",
+                       [N, rabbit_misc:rs(
+                             rabbit_delayed_message_counters:id_to_exchange_name(Id))]),
+            _ = case CurrTimer of
+                    not_set -> ok;
+                    _       -> erlang:cancel_timer(CurrTimer)
+                end,
+            State#state{timer = maybe_delay_first()}
+    end.
 
 maybe_delay_first() ->
     case get_first_delay() of

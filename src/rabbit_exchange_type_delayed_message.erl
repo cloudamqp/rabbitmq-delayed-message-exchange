@@ -152,7 +152,19 @@ delay_message(Exchange, Message) ->
         {ok, Delay} when Delay > 0, Delay =< ?ERL_MAX_T ->
             rabbit_delayed_message:delay_message(Exchange, Message, Delay);
         _ ->
-            nodelay
+            %% A blocked exchange routes nothing, not even messages that
+            %% are not delayed: they are stored with a zero delay, so
+            %% they are kept right away and routed in publish order
+            %% along with the delayed ones once unblocked. The delayed
+            %% message server routes expired messages through here too:
+            %% it has checked the block already, and must not call itself.
+            case self() =/= whereis(rabbit_delayed_message) andalso
+                 rabbit_delayed_message_block:is_blocked(Exchange) of
+                true ->
+                    rabbit_delayed_message:delay_message(Exchange, Message, 0);
+                false ->
+                    nodelay
+            end
     end.
 
 %% assumes the type is set in the args and that validate/1 did its job
