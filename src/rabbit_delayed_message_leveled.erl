@@ -85,7 +85,7 @@ destroy_db() ->
         _:_ -> _ = rabbit_file:recursive_delete([db_path()])
     end,
     _ = persistent_term:erase({?MODULE, bookie}),
-    ok.
+    erase_counters().
 
 messages_delayed(Exchange) ->
     case get_counter(exchange_to_counter_bin(Exchange)) of
@@ -172,6 +172,14 @@ counter_bin_to_exchange_name(<<VHostLen:16/big, VHost:VHostLen/binary, Name/bina
 counter_key(ExNameBin) ->
     {?MODULE, counter, ExNameBin}.
 
+%% Counters live in persistent_term, so they outlive the Leveled store and must
+%% be erased together with it. Otherwise a re-enabled plugin would report the
+%% counts of messages that were destroyed on disable.
+erase_counters() ->
+    _ = [persistent_term:erase(Key)
+         || {{?MODULE, counter, _} = Key, _} <- persistent_term:get()],
+    ok.
+
 get_counter(ExNameBin) ->
     case persistent_term:get(counter_key(ExNameBin), undefined) of
         undefined -> not_found;
@@ -211,6 +219,7 @@ decrease_counter(ExNameBin) ->
 %% Leveled metadata fold. The extract_metadata override stored ExNameBin in
 %% the ledger head, so book_headfold can retrieve it without touching the journal.
 init_index_and_counters() ->
+    ok = erase_counters(),
     ets:new(?INDEX_TABLE, [named_table, ordered_set, public]),
     FoldFun = fun(_B, <<DelayTS:64/big, _:128>> = Key, ProxyBin, Acc) ->
         %% The ledger head is wrapped in a proxy_object by book_headfold.
