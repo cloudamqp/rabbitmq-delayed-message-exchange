@@ -38,6 +38,7 @@ groups() ->
                                 routing_topic,
                                 routing_topic_unbind_stops_routing,
                                 routing_topic_empty_binding_key_isolated,
+                                routing_topic_hash_wildcards,
                                 routing_direct,
                                 routing_fanout,
                                 e2e_nodelay,
@@ -453,6 +454,41 @@ routing_topic_empty_binding_key_isolated(Config) ->
     amqp_channel:call(Chan, #'exchange.delete'{exchange = Ex2}),
     amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
     rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+routing_topic_hash_wildcards(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+    setup_fabric(Chan, make_exchange(Ex, <<"topic">>), make_queue(Q),
+                 <<"#.#">>),
+
+    RK = iolist_to_binary(lists:join(<<".">>, lists:duplicate(32, <<"w">>))),
+    XName = rabbit_misc:r(<<"/">>, exchange, Ex),
+    %% Without the seen-state check, the queue is returned once per way
+    %% the first '#' can split the routing key.
+    ?assertEqual([rabbit_misc:r(<<"/">>, queue, Q)],
+                 rabbit_ct_broker_helpers:rpc(
+                   Config, 0, rabbit_delayed_message_topic_trie, match,
+                   [XName, RK])),
+
+    amqp_channel:call(Chan, #'confirm.select'{}),
+    publish_messages(Chan, Ex, RK, [0]),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    #'queue.declare_ok'{message_count = C} =
+        amqp_channel:call(Chan, make_queue(Q)),
+    ?assertEqual(1, C),
+
+    process_flag(trap_exit, true),
+    ?assertExit({{shutdown, {server_initiated_close, 406, _}}, _},
+                amqp_channel:call(Chan, #'queue.bind'{queue = Q,
+                                                      exchange = Ex,
+                                                      routing_key = <<"#.#.#">>})),
+
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+    amqp_channel:call(Chan2, #'exchange.delete'{exchange = Ex}),
+    amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
     ok.
 
 %% The node boots with the delayed_message_topic_projection_v2 feature

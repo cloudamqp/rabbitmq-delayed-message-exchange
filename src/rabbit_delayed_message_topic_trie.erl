@@ -25,7 +25,7 @@
 %% * v2: one projection with two ETS tables, a trie edges table (set)
 %%   plus a leaf bindings table (ordered_set). A copy of rabbit's v5
 %%   projection (rabbit_khepri:register_rabbit_topic_trie_projection/1)
-%%   and match walk (rabbit_db_topic_exchange:trie_match/7) introduced
+%%   and match walk (rabbit_db_topic_exchange:trie_match/8) introduced
 %%   in RabbitMQ 4.3.x. Binding updates are O(log N) instead of O(N) in
 %%   the number of bindings at a leaf, and trie roots are
 %%   exchange-scoped, which keeps empty binding keys isolated per
@@ -298,7 +298,8 @@ match_v2(#resource{virtual_host = VHost, name = Name}, Words) ->
     XSrc = {VHost, Name},
     Root = {root, XSrc},
     try
-        trie_match(XSrc, Root, Words, [])
+        {_Seen, Acc} = trie_match(XSrc, Root, Words, 0, {no_memo, []}),
+        Acc
     catch
         %% The projection tables may not exist yet, e.g. on a freshly
         %% booted node before the boot step registered the projection.
@@ -307,7 +308,7 @@ match_v2(#resource{virtual_host = VHost, name = Name}, Words) ->
     end.
 
 %%----------------------------------------------------------------------------
-%% v2 match walk - copied from rabbit_db_topic_exchange:trie_match/7.
+%% v2 match walk - copied from rabbit_db_topic_exchange:trie_match/8.
 %%
 %% Routing walks the trie (branching on literal word, <<"*">>, <<"#">>)
 %% then collects destinations from the bindings table at each matching
@@ -315,32 +316,50 @@ match_v2(#resource{virtual_host = VHost, name = Name}, Words) ->
 %% leaf for fanout 0-2, or O(log N + F) per leaf for fanout F > 2.
 %%----------------------------------------------------------------------------
 
-trie_match(XSrc, Node, [], Acc0) ->
-    Acc1 = trie_bindings(Node, Acc0),
-    trie_match_try(XSrc, Node, <<"#">>, fun trie_match_skip_any/4,
-                   [], Acc1);
-trie_match(XSrc, Node, [W | RestW] = Words, Acc0) ->
-    Acc1 = trie_match_try(XSrc, Node, W, fun trie_match/4,
-                          RestW, Acc0),
-    Acc2 = trie_match_try(XSrc, Node, <<"*">>, fun trie_match/4,
-                          RestW, Acc1),
-    trie_match_try(XSrc, Node, <<"#">>, fun trie_match_skip_any/4,
-                   Words, Acc2).
+%% With two or more '#' edges on the path, the walk can reach the same
+%% {node, remaining words} state many times, and the number of such repeats
+%% grows combinatorially with the routing key length. Seen states are
+%% therefore recorded and skipped. Hashes counts the '#' edges taken so far;
+%% with fewer than two, states cannot repeat and no bookkeeping is done.
+trie_match(XSrc, Node, Words, Hashes, State) when Hashes < 2 ->
+    trie_match1(XSrc, Node, Words, Hashes, State);
+trie_match(XSrc, Node, Words, Hashes, {no_memo, Acc}) ->
+    trie_match(XSrc, Node, Words, Hashes, {#{}, Acc});
+trie_match(XSrc, Node, Words, Hashes, {Seen, Acc} = State) ->
+    case Seen of
+        #{{Node, Words} := _} ->
+            State;
+        _ ->
+            trie_match1(XSrc, Node, Words, Hashes,
+                        {Seen#{{Node, Words} => []}, Acc})
+    end.
 
-trie_match_try(XSrc, Node, Word, MatchFun, RestW, Acc) ->
+trie_match1(XSrc, Node, [], Hashes, {Seen, Acc0}) ->
+    Acc1 = trie_bindings(Node, Acc0),
+    trie_match_try(XSrc, Node, <<"#">>, fun trie_match_skip_any/5,
+                   [], Hashes + 1, {Seen, Acc1});
+trie_match1(XSrc, Node, [W | RestW] = Words, Hashes, State0) ->
+    State1 = trie_match_try(XSrc, Node, W, fun trie_match/5,
+                            RestW, Hashes, State0),
+    State2 = trie_match_try(XSrc, Node, <<"*">>, fun trie_match/5,
+                            RestW, Hashes, State1),
+    trie_match_try(XSrc, Node, <<"#">>, fun trie_match_skip_any/5,
+                   Words, Hashes + 1, State2).
+
+trie_match_try(XSrc, Node, Word, MatchFun, RestW, Hashes, State) ->
     case ets:lookup_element(?TRIE_TABLE_V2, {XSrc, Node, Word}, 2,
                             undefined) of
         undefined ->
-            Acc;
+            State;
         NextNode ->
-            MatchFun(XSrc, NextNode, RestW, Acc)
+            MatchFun(XSrc, NextNode, RestW, Hashes, State)
     end.
 
-trie_match_skip_any(XSrc, Node, [], Acc) ->
-    trie_match(XSrc, Node, [], Acc);
-trie_match_skip_any(XSrc, Node, [_ | RestW] = Words, Acc) ->
-    trie_match_skip_any(XSrc, Node, RestW,
-                        trie_match(XSrc, Node, Words, Acc)).
+trie_match_skip_any(XSrc, Node, [], Hashes, State) ->
+    trie_match(XSrc, Node, [], Hashes, State);
+trie_match_skip_any(XSrc, Node, [_ | RestW] = Words, Hashes, State) ->
+    trie_match_skip_any(XSrc, Node, RestW, Hashes,
+                        trie_match(XSrc, Node, Words, Hashes, State)).
 
 %% Collect all destinations bound at the given trie node.
 %%
