@@ -30,7 +30,7 @@ of some kind.
 
 ## Supported RabbitMQ Versions
 
-This version of the plugin requires **RabbitMQ 4.3.3 or later**.
+This version of the plugin requires **RabbitMQ 4.4.0 or a later 4.4.x release**.
 
 Each build of this plugin pins to a specific RabbitMQ patch version (see `RABBITMQ_VERSION` in the `Makefile`).
 
@@ -467,19 +467,19 @@ HAVEN'T BEEN DELIVERED WILL BE LOST**.
 ## Building the Plugin
 
 ```shell
-PROJECT_VERSION=4.3.3 PRODUCT_VERSION=4.3.3 VERSION=4.3.3 \
-    gmake dist PROJECT_VERSION=4.3.3 PRODUCT_VERSION=4.3.3 \
-    VERSION=4.3.3 DIST_AS_EZS=true
+PLUGIN_VERSION=v4.4.0 gmake dist DIST_AS_EZS=true
 ```
 
-The EZ file is created in the `plugins` directory.
+The EZ file is created in the `plugins` directory. `PLUGIN_VERSION` sets the
+version of the plugin, which otherwise is `RABBITMQ_VERSION`. After a build with
+another version, run `gmake clean` first, as the `.app` file is not regenerated.
 
 ## Creating a Release
 
-1. Update `RABBITMQ_VERSION` in `Makefile` to the target RabbitMQ release (e.g. `v4.3.3`)
-1. Update `broker_version_requirements` in the `PROJECT_APP_EXTRA_KEYS` block of `Makefile` to the oldest patch release the artifacts can load on, which need not be `RABBITMQ_VERSION` but must not predate the first release requiring the Erlang version used to build them
+1. Update `RABBITMQ_VERSION` in `Makefile` to the target RabbitMQ release (e.g. `v4.4.1`)
+1. Update `broker_version_requirements` in the `PROJECT_APP_EXTRA_KEYS` block of `Makefile` to a range starting at the oldest patch release the artifacts can load on (e.g. `~4.4.0`), which need not be `RABBITMQ_VERSION` but must not predate the first release requiring the Erlang version used to build them. Since RabbitMQ 4.4 a bare version such as `4.4.1` only matches that patch release
 1. Update the RabbitMQ and Erlang versions in `.github/workflows/test.yml` and `.github/workflows/package.yml`
-1. Push a tag (i.e. `v4.3.3`) with the matching version
+1. Push a tag with the plugin version (e.g. `v4.4.0`). It need not match `RABBITMQ_VERSION`: the Package workflow uses it as the version of the built plugin
 1. The Package workflow (`.github/workflows/package.yml`) builds the `.ez` artifacts on push
 1. Attach the produced `rabbitmq_delayed_message_exchange*.ez` and `leveled*.ez` files to a GitHub release
 
