@@ -106,14 +106,26 @@ setup() ->
     %% Close any bookie left open by the migration converter so there is at most
     %% one bookie at this path at a time. Errors are swallowed; the data is safe
     %% on disk via the leveled journal and will be recovered by book_start/1.
-    catch leveled_bookie:book_close(?BOOKIE),
+    try
+        leveled_bookie:book_close(?BOOKIE)
+    catch
+        _:_ -> ok
+    end,
     ok = rabbit_delayed_message_counters:setup(),
     start_db(),
     init_index_and_counters().
 
 disable_plugin() ->
-    catch ets:delete(?INDEX_TABLE),
-    catch rabbit_delayed_message_counters:teardown(),
+    try
+        ets:delete(?INDEX_TABLE)
+    catch
+        _:_ -> ok
+    end,
+    try
+        rabbit_delayed_message_counters:teardown()
+    catch
+        _:_ -> ok
+    end,
     leveled_bookie:book_destroy(?BOOKIE).
 
 %% Asks the bookie to compact the journal. Returns as soon as the job is

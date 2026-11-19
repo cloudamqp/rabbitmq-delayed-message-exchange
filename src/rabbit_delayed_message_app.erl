@@ -22,7 +22,11 @@ start(_Type, _StartArgs) ->
     end.
 
 stop(_State) ->
-    _ = catch rabbit_delayed_message_prometheus:deregister_collector(),
+    try
+        rabbit_delayed_message_prometheus:deregister_collector()
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %% Registers collector only when the prometheus application is available.
