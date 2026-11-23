@@ -31,13 +31,16 @@
      {requires,    core_initialized},
      {enables,     recovery}]}).
 
-%% Public API
+%% Public API, for operators
 -export([block/0,
          block/1,
          unblock/0,
          unblock/1,
-         is_blocked/0,
          status/0]).
+
+%% Internal use by the plugin: the local check made by the delayed message
+%% server
+-export([is_blocked/0]).
 
 %% Internal RPC
 -export([local_state/0]).
