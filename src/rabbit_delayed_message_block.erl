@@ -69,8 +69,9 @@
 %% Each node applies the block on its own, so this waits, up to Timeout
 %% milliseconds, for every node running the plugin to have applied it.
 %% `ok' means they all have: it is safe to start restarting nodes.
-%% `{applying, Nodes}' means the nodes listed have not yet: wait, and check
-%% with status/0.
+%% `{applying, Nodes}' means the nodes listed have not yet.
+%% Operators may use status/0 to check whether the block is still being
+%% applied or completed.
 -spec block() -> result().
 block() ->
     block(?DEFAULT_TIMEOUT).
