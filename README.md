@@ -244,37 +244,39 @@ different exchange type, like `"topic"` for example. You can also
 specify exchange types provided by plugins. Note that this argument is
 **required** and **must** refer to an **existing exchange type**.
 
-## Blocking the Routing of an Exchange
+## Blocking Routing During Upgrades
 
-An exchange can be **blocked**: while blocked, it keeps accepting publishes, but
-it routes nothing. Messages whose delay expires stay stored, and so do messages
-published without a delay. Unblocking the exchange routes every kept message to
-the queues bound at that time, in delay order, and routing goes back to normal.
-
-This is an Erlang API, callable with `rabbitmqctl eval`:
+While nodes restart during a rolling upgrade, quorum queues elect new leaders
+and classic queue processes stop. A delayed message whose delay expires at that
+moment can find no route and is then dropped silently. To avoid that, routing of
+expired delayed messages can be **blocked** for the whole cluster before the
+upgrade and **unblocked** after it:
 
 ``` bash
-# block exchange "my-exchange" in vhost "/"
-rabbitmqctl eval 'rabbit_delayed_message_block:block(<<"/">>, <<"my-exchange">>).'
+rabbitmqctl eval 'rabbit_delayed_message_block:block().'
+# ... rolling upgrade ...
+rabbitmqctl eval 'rabbit_delayed_message_block:unblock().'
 
-# unblock it
-rabbitmqctl eval 'rabbit_delayed_message_block:unblock(<<"/">>, <<"my-exchange">>).'
-
-# list blocked exchanges
-rabbitmqctl eval 'rabbit_delayed_message_block:list().'
+# check the current state
+rabbitmqctl eval 'rabbit_delayed_message_block:is_blocked().'
 ```
 
-`block/1`, `unblock/1` and `is_blocked/1` also take an exchange name record
-(`#resource{}`). `block` returns `{error, not_found}` for a missing exchange and
-`{error, not_delayed_exchange}` for an exchange of another type.
+While routing is blocked:
 
-Things to know:
+ * every `x-delayed-message` exchange, on every node, keeps accepting and
+   storing delayed messages, but routes none of them when their delay expires:
+   they stay stored, and still count in `messages_delayed` and in the
+   Prometheus metrics
+ * messages published **without** a delay are routed as usual: the publishing
+   channel routes them, so publishers learn about a missing route through
+   publisher confirms or the `mandatory` flag
+ * the block is stored in the metadata store (Khepri), so a node that restarts
+   comes back blocked
 
- * blocks are stored in the metadata store (Khepri): they apply to the whole
-   cluster and survive restarts, and so do the kept messages
- * kept messages still count in `messages_delayed` and in the Prometheus metrics
- * deleting the exchange removes its block; its kept messages are dropped, like
-   any other delayed message of a deleted exchange
+Unblocking routes every message that expired meanwhile, in delay order, and
+routing goes back to normal. Nodes running a plugin version without this feature
+ignore the block, so it only protects a cluster where every node already runs a
+version that has it.
 
 ## Performance Impact ##
 

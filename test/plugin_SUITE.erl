@@ -52,10 +52,7 @@ groups() ->
                                 node_restart_after_delay_expires,
                                 string_delay_header,
                                 block_and_unblock,
-                                block_does_not_delay_other_exchanges,
-                                block_errors,
-                                block_survives_restart,
-                                block_removed_on_exchange_delete
+                                block_survives_restart
                                ]},
      {fine_stats, [], [
                        e2e_nodelay,
@@ -147,6 +144,11 @@ init_per_testcase(Testcase, Config) ->
     reset_publish_out_stats(Config),
     rabbit_ct_helpers:testcase_started(Config1, Testcase).
 
+end_per_testcase(Testcase, Config) when Testcase =:= block_and_unblock;
+                                       Testcase =:= block_survives_restart ->
+    %% Never leave routing blocked behind for the next test cases.
+    ok = unblock(Config),
+    rabbit_ct_helpers:testcase_finished(Config, Testcase);
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
@@ -898,69 +900,57 @@ string_delay_header(Config) ->
 
     ok.
 
-%% A blocked exchange keeps its messages past their delay, delayed or not,
-%% and routes them all in delay order once unblocked.
+%% While routing is blocked, no delayed message of any exchange is routed when
+%% it expires; unblocking routes them all in delay order. Messages without a
+%% delay are routed as usual.
 block_and_unblock(Config) ->
     Chan = rabbit_ct_client_helpers:open_channel(Config),
 
-    Ex = make_exchange_name(Config, "1"),
-    Q = make_queue_name(Config, "1"),
-
-    setup_fabric(Chan, make_exchange(Ex, <<"direct">>), make_queue(Q)),
-
-    ok = block(Config, <<"/">>, Ex),
-    ?assert(is_blocked(Config, <<"/">>, Ex)),
-
-    %% 0 is not a delay: the message would be routed right away if the
-    %% exchange was not blocked.
-    Msgs = [300, 100, 200, 0],
-    publish_messages(Chan, Ex, Msgs),
-
-    ?awaitMatch(4, messages_delayed(Config, <<"/">>, Ex), 3000),
-    timer:sleep(lists:max(Msgs) + 1000),
-    ?assertEqual(0, queue_message_count(Chan, Q)),
-    ?assertEqual(4, messages_delayed(Config, <<"/">>, Ex)),
-
-    ok = unblock(Config, <<"/">>, Ex),
-    ?assertNot(is_blocked(Config, <<"/">>, Ex)),
-
-    {ok, Result} = consume(Chan, Q, Msgs),
-    ?assertEqual(lists:sort(Msgs), Result),
-    ?awaitMatch(0, messages_delayed(Config, <<"/">>, Ex), 3000),
-
-    %% Once unblocked, routing is back to normal.
-    publish_messages(Chan, Ex, [100]),
-    ?assertEqual({ok, [100]}, collect(1, 3000)),
-
-    delete_exchange(Chan, Ex),
-    #'queue.delete_ok'{} = amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
-    rabbit_ct_client_helpers:close_channel(Chan),
-    ok.
-
-%% The kept messages are set aside, so the messages of other exchanges that
-%% expire after them are still routed on time.
-block_does_not_delay_other_exchanges(Config) ->
-    Chan = rabbit_ct_client_helpers:open_channel(Config),
-
-    Ex1 = make_exchange_name(Config, "blocked"),
-    Q1 = make_queue_name(Config, "blocked"),
-    Ex2 = make_exchange_name(Config, "free"),
-    Q2 = make_queue_name(Config, "free"),
+    Ex1 = make_exchange_name(Config, "1"),
+    Q1 = make_queue_name(Config, "1"),
+    Ex2 = make_exchange_name(Config, "2"),
+    Q2 = make_queue_name(Config, "2"),
 
     setup_fabric(Chan, make_exchange(Ex1, <<"direct">>), make_queue(Q1)),
     setup_fabric(Chan, make_exchange(Ex2, <<"direct">>), make_queue(Q2)),
 
-    ok = block(Config, <<"/">>, Ex1),
-    publish_messages(Chan, Ex1, [100, 200, 300]),
-    publish_messages(Chan, Ex2, [500, 600]),
+    %% Published before the block, so the server has a timer running for
+    %% it when routing gets blocked.
+    publish_messages(Chan, Ex1, [1000]),
+    ?awaitMatch(1, messages_delayed(Config, <<"/">>, Ex1), 3000),
 
-    {ok, Result2} = consume(Chan, Q2, [500, 600]),
-    ?assertEqual([500, 600], Result2),
+    ?assertNot(is_blocked(Config)),
+    ok = block(Config),
+    ?assert(is_blocked(Config)),
+    %% Blocking again is a no-op.
+    ok = block(Config),
+
+    publish_messages(Chan, Ex1, [300, 100]),
+    publish_messages(Chan, Ex2, [200]),
+    ?awaitMatch(3, messages_delayed(Config, <<"/">>, Ex1), 3000),
+    ?awaitMatch(1, messages_delayed(Config, <<"/">>, Ex2), 3000),
+
+    %% A message without a delay is not held back.
+    publish_messages(Chan, Ex2, [0]),
+    ?awaitMatch(1, queue_message_count(Chan, Q2), 3000),
+
+    timer:sleep(2000),
     ?assertEqual(0, queue_message_count(Chan, Q1)),
+    ?assertEqual(1, queue_message_count(Chan, Q2)),
+    ?assertEqual(3, messages_delayed(Config, <<"/">>, Ex1)),
+    ?assertEqual(1, messages_delayed(Config, <<"/">>, Ex2)),
 
-    ok = unblock(Config, <<"/">>, Ex1),
-    {ok, Result1} = consume(Chan, Q1, [100, 200, 300]),
-    ?assertEqual([100, 200, 300], Result1),
+    ok = unblock(Config),
+    ?assertNot(is_blocked(Config)),
+    %% Unblocking again is a no-op.
+    ok = unblock(Config),
+
+    {ok, Result1} = consume(Chan, Q1, [100, 300, 1000]),
+    ?assertEqual([100, 300, 1000], Result1),
+    {ok, Result2} = consume(Chan, Q2, [0, 200]),
+    ?assertEqual([0, 200], Result2),
+    ?awaitMatch(0, messages_delayed(Config, <<"/">>, Ex1), 3000),
+    ?awaitMatch(0, messages_delayed(Config, <<"/">>, Ex2), 3000),
 
     delete_exchange(Chan, Ex1),
     delete_exchange(Chan, Ex2),
@@ -969,38 +959,8 @@ block_does_not_delay_other_exchanges(Config) ->
     rabbit_ct_client_helpers:close_channel(Chan),
     ok.
 
-block_errors(Config) ->
-    Chan = rabbit_ct_client_helpers:open_channel(Config),
-
-    Ex = make_exchange_name(Config, "1"),
-    Direct = make_exchange_name(Config, "direct"),
-
-    ?assertEqual({error, not_found}, block(Config, <<"/">>, Ex)),
-
-    #'exchange.declare_ok'{} =
-        amqp_channel:call(Chan, #'exchange.declare'{exchange = Direct,
-                                                    type = <<"direct">>}),
-    ?assertEqual({error, not_delayed_exchange}, block(Config, <<"/">>, Direct)),
-
-    declare_exchange(Chan, make_exchange(Ex, <<"direct">>)),
-    ok = block(Config, <<"/">>, Ex),
-    %% Blocking again is a no-op.
-    ok = block(Config, <<"/">>, Ex),
-    ?assertEqual([rabbit_misc:r(<<"/">>, exchange, Ex)],
-                 rabbit_ct_broker_helpers:rpc(
-                   Config, 0, rabbit_delayed_message_block, list, [])),
-
-    ok = unblock(Config, <<"/">>, Ex),
-    %% Unblocking again is a no-op.
-    ok = unblock(Config, <<"/">>, Ex),
-    ?assertNot(is_blocked(Config, <<"/">>, Ex)),
-
-    delete_exchange(Chan, Ex),
-    delete_exchange(Chan, Direct),
-    rabbit_ct_client_helpers:close_channel(Chan),
-    ok.
-
-%% Kept messages are on disk, and a restart does not lift the block.
+%% A node restarting while routing is blocked comes back blocked, and keeps
+%% the messages that expired.
 block_survives_restart(Config) ->
     Chan = rabbit_ct_client_helpers:open_channel(Config),
 
@@ -1010,7 +970,7 @@ block_survives_restart(Config) ->
     setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
                  make_durable_queue(Q)),
 
-    ok = block(Config, <<"/">>, Ex),
+    ok = block(Config),
 
     Msgs = [400, 100, 300, 200],
     amqp_channel:call(Chan, #'confirm.select'{}),
@@ -1021,12 +981,12 @@ block_survives_restart(Config) ->
     rabbit_ct_broker_helpers:restart_node(Config, 0),
     Chan2 = rabbit_ct_client_helpers:open_channel(Config),
 
-    ?assert(is_blocked(Config, <<"/">>, Ex)),
+    ?assert(is_blocked(Config)),
     timer:sleep(1000),
     ?assertEqual(0, queue_message_count(Chan2, Q)),
     ?assertEqual(4, messages_delayed(Config, <<"/">>, Ex)),
 
-    ok = unblock(Config, <<"/">>, Ex),
+    ok = unblock(Config),
     {ok, Result} = consume(Chan2, Q, Msgs),
     ?assertEqual(lists:sort(Msgs), Result),
 
@@ -1035,48 +995,17 @@ block_survives_restart(Config) ->
     rabbit_ct_client_helpers:close_channel(Chan2),
     ok.
 
-%% A block goes away with its exchange, so a new exchange declared under the
-%% same name routes normally.
-block_removed_on_exchange_delete(Config) ->
-    Chan = rabbit_ct_client_helpers:open_channel(Config),
-
-    Ex = make_exchange_name(Config, "1"),
-    Q = make_queue_name(Config, "1"),
-
-    setup_fabric(Chan, make_exchange(Ex, <<"direct">>), make_queue(Q)),
-    ok = block(Config, <<"/">>, Ex),
-    publish_messages(Chan, Ex, [100]),
-    ?awaitMatch(1, messages_delayed(Config, <<"/">>, Ex), 3000),
-
-    delete_exchange(Chan, Ex),
-    ?awaitMatch(false, is_blocked(Config, <<"/">>, Ex), 3000),
-    %% The released message must be routed, to nowhere, before an exchange
-    %% of the same name gets bindings again.
-    ?awaitMatch(undefined, exchange_counters(Config, <<"/">>, Ex), 3000),
-    timer:sleep(500),
-
-    setup_fabric(Chan, make_exchange(Ex, <<"direct">>), make_queue(Q)),
-    publish_messages(Chan, Ex, [200]),
-    {ok, Result} = consume(Chan, Q, [200]),
-    %% The message kept by the deleted exchange is dropped, not routed.
-    ?assertEqual([200], Result),
-
-    delete_exchange(Chan, Ex),
-    #'queue.delete_ok'{} = amqp_channel:call(Chan, #'queue.delete'{queue = Q}),
-    rabbit_ct_client_helpers:close_channel(Chan),
-    ok.
-
-block(Config, VHost, Ex) ->
+block(Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_block,
-                                 block, [VHost, Ex]).
+                                 block, []).
 
-unblock(Config, VHost, Ex) ->
+unblock(Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_block,
-                                 unblock, [VHost, Ex]).
+                                 unblock, []).
 
-is_blocked(Config, VHost, Ex) ->
+is_blocked(Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_block,
-                                 is_blocked, [rabbit_misc:r(VHost, exchange, Ex)]).
+                                 is_blocked, []).
 
 queue_message_count(Chan, Q) ->
     #'queue.declare_ok'{message_count = N} =

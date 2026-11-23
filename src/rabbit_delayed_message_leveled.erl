@@ -22,15 +22,6 @@
 %% so that deleting an entry can decrease the byte counter without a disk read.
 -define(INDEX_TABLE, rabbit_delayed_message_leveled_key_index).
 
-%% ordered_set ETS table of the expired messages of blocked exchanges, taken out
-%% of the index so that they do not stand in the way of the other exchanges'
-%% messages. Entries are {{ExNameBin, DelayTS, Key}, PayloadBytes}, so the
-%% messages of one exchange are adjacent and sorted by expiry. The messages
-%% themselves stay in Leveled: the table is rebuilt from scratch on restart,
-%% when every message goes back to the index and is set aside again as it
-%% expires if its exchange is still blocked.
--define(HELD_TABLE, rabbit_delayed_message_leveled_held).
-
 -export([setup/0,
          disable_plugin/0,
          compact_journal/0,
@@ -39,9 +30,6 @@
          get_many/1,
          delete/1,
          delete_empty_key/1,
-         exchange_id/1,
-         hold/1,
-         release/1,
          list_all_keys/0,
          start_opts/1
         ]).
@@ -120,13 +108,11 @@ setup() ->
     %% on disk via the leveled journal and will be recovered by book_start/1.
     catch leveled_bookie:book_close(?BOOKIE),
     ok = rabbit_delayed_message_counters:setup(),
-    _ = ets:new(?HELD_TABLE, [named_table, ordered_set, public]),
     start_db(),
     init_index_and_counters().
 
 disable_plugin() ->
     catch ets:delete(?INDEX_TABLE),
-    catch ets:delete(?HELD_TABLE),
     catch rabbit_delayed_message_counters:teardown(),
     leveled_bookie:book_destroy(?BOOKIE).
 
@@ -221,50 +207,6 @@ delete({_DelayTS, LeveledKey} = IndexKey) ->
 
 delete_empty_key(IndexKey) ->
     ets:delete(?INDEX_TABLE, IndexKey).
-
-%% The exchange a message was delayed by, `undefined' when the index does
-%% not know the key (already delivered, or a stale pre-Leveled key).
-exchange_id({_DelayTS, _LeveledKey} = IndexKey) ->
-    case ets:whereis(?INDEX_TABLE) of
-        undefined ->
-            undefined;
-        _ ->
-            case ets:lookup(?INDEX_TABLE, IndexKey) of
-                [{_, ExNameBin, _Bytes}] -> ExNameBin;
-                []                       -> undefined
-            end
-    end;
-exchange_id(_) ->
-    undefined.
-
-%% Moves an expired message of a blocked exchange out of the index. The message
-%% stays in Leveled and in the counters: it is still delayed.
-hold({DelayTS, LeveledKey} = IndexKey) ->
-    case ets:take(?INDEX_TABLE, IndexKey) of
-        [{_, ExNameBin, Bytes}] ->
-            true = ets:insert(?HELD_TABLE, {{ExNameBin, DelayTS, LeveledKey}, Bytes}),
-            ok;
-        [] ->
-            ok
-    end.
-
-%% Puts the held messages of an exchange back into the index. They are all
-%% expired, so the server routes them on its next timer runs. Returns how
-%% many messages were released.
-release(ExNameBin) ->
-    case ets:whereis(?HELD_TABLE) of
-        undefined ->
-            0;
-        _ ->
-            Held = ets:match_object(?HELD_TABLE, {{ExNameBin, '_', '_'}, '_'}),
-            lists:foreach(
-              fun({{_, DelayTS, LeveledKey} = HeldKey, Bytes}) ->
-                      true = ets:insert(?INDEX_TABLE,
-                                        {{DelayTS, LeveledKey}, ExNameBin, Bytes}),
-                      true = ets:delete(?HELD_TABLE, HeldKey)
-              end, Held),
-            length(Held)
-    end.
 
 make_key(DelayTS) ->
     <<DelayTS:64/big, (crypto:strong_rand_bytes(16))/binary>>.
