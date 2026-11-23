@@ -17,7 +17,8 @@
 all() ->
     [
       {group, leveled},
-      {group, leveled_projection_v1}
+      {group, leveled_projection_v1},
+      {group, cluster}
     ].
 
 groups() ->
@@ -32,6 +33,8 @@ groups() ->
                           journal_compaction_on_live_store,
                           disable_cleanup]},
       {leveled_projection_v1, [], [topic_projection_v1_to_v2_migration]},
+      {cluster, [], [cluster_block_propagates_and_survives_restart,
+                     cluster_block_reports_applying_nodes]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
@@ -101,6 +104,18 @@ init_per_group(leveled_projection_v1, Config) ->
                  [{forced_feature_flags_on_init,
                    {rel, [], [delayed_message_topic_projection_v2]}}]}),
     run_broker_and_clients(Config2);
+init_per_group(cluster, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, khepri},
+            {rmq_nodes_count, 3},
+            {rmq_nodes_clustered, true},
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-cluster")},
+            {tcp_ports_base, 21700}
+        ]
+    ),
+    run_broker_and_clients(Config1);
 init_per_group(fine_stats, Config) ->
     CollectStatsOrig = get_collect_stats(Config),
     set_collect_stats(Config, fine),
@@ -112,6 +127,8 @@ init_per_group(_, Config) ->
 end_per_group(leveled, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(leveled_projection_v1, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(cluster, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
@@ -145,9 +162,11 @@ init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config1, Testcase).
 
 end_per_testcase(Testcase, Config) when Testcase =:= block_and_unblock;
-                                       Testcase =:= block_survives_restart ->
+                                       Testcase =:= block_survives_restart;
+                                       Testcase =:= cluster_block_propagates_and_survives_restart;
+                                       Testcase =:= cluster_block_reports_applying_nodes ->
     %% Never leave routing blocked behind for the next test cases.
-    ok = unblock(Config),
+    _ = unblock(Config),
     rabbit_ct_helpers:testcase_finished(Config, Testcase);
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
@@ -920,8 +939,10 @@ block_and_unblock(Config) ->
     ?awaitMatch(1, messages_delayed(Config, <<"/">>, Ex1), 3000),
 
     ?assertNot(is_blocked(Config)),
+    ?assertEqual(unblocked, block_status(Config)),
     ok = block(Config),
     ?assert(is_blocked(Config)),
+    ?assertEqual(blocked, block_status(Config)),
     %% Blocking again is a no-op.
     ok = block(Config),
 
@@ -942,6 +963,7 @@ block_and_unblock(Config) ->
 
     ok = unblock(Config),
     ?assertNot(is_blocked(Config)),
+    ?assertEqual(unblocked, block_status(Config)),
     %% Unblocking again is a no-op.
     ok = unblock(Config),
 
@@ -995,17 +1017,117 @@ block_survives_restart(Config) ->
     rabbit_ct_client_helpers:close_channel(Chan2),
     ok.
 
+%% Delayed messages are stored on the node that accepted the publish, so
+%% every node holds some. Routing is blocked through one node and unblocked
+%% through another, and a third node is restarted while blocked.
+cluster_block_propagates_and_survives_restart(Config) ->
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+    Ch0 = rabbit_ct_client_helpers:open_channel(Config, 0),
+    setup_fabric(Ch0, make_durable_exchange(Ex, <<"direct">>),
+                 make_quorum_queue(Q)),
+
+    ok = block(Config, 0),
+    ?assertEqual(blocked, block_status(Config, 1)),
+    [?assert(is_blocked(Config, Node)) || Node <- [0, 1, 2]],
+
+    Msgs = [{0, 300}, {1, 400}, {2, 500}, {2, 200}],
+    [publish_confirmed(Config, Node, Ex, Delay) || {Node, Delay} <- Msgs],
+    timer:sleep(1500),
+    ?assertEqual(0, queue_message_count(Ch0, Q)),
+
+    rabbit_ct_broker_helpers:restart_node(Config, 2),
+    ?assert(is_blocked(Config, 2)),
+    ?assertEqual(blocked, block_status(Config, 2)),
+    timer:sleep(1000),
+    ?assertEqual(0, queue_message_count(Ch0, Q)),
+
+    ok = unblock(Config, 1),
+    ?assertEqual(unblocked, block_status(Config, 0)),
+    [?assertNot(is_blocked(Config, Node)) || Node <- [0, 1, 2]],
+    ?awaitMatch(4, queue_message_count(Ch0, Q), 10000),
+
+    delete_exchange(Ch0, Ex),
+    #'queue.delete_ok'{} = amqp_channel:call(Ch0, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Ch0),
+    ok.
+
+%% A node that has not applied the block yet makes block/1 and status/0
+%% report it. The node is held back by suspending its Khepri member, which
+%% must be a follower so that the rest of the cluster keeps a quorum.
+cluster_block_reports_applying_nodes(Config) ->
+    StoreId = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_khepri,
+                                           get_store_id, []),
+    [Node0, Node1, Node2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    {ok, _, {_, Leader}} = rabbit_ct_broker_helpers:rpc(
+                             Config, 0, ra, members, [{StoreId, Node0}]),
+    %% Block through node 0, and hold back a node that is neither the
+    %% caller nor the leader.
+    [Lagging | _] = [N || N <- [Node1, Node2], N =/= Leader],
+    LaggingIdx = case Lagging of Node1 -> 1; Node2 -> 2 end,
+
+    ok = rabbit_ct_broker_helpers:rpc(Config, LaggingIdx, sys, suspend,
+                                      [StoreId]),
+    try
+        ?assertEqual({applying, [Lagging]}, block(Config, 0, 500)),
+        ?assertNot(is_blocked(Config, LaggingIdx)),
+        ?assertEqual({applying, [Lagging]}, block_status(Config, 0))
+    after
+        ok = rabbit_ct_broker_helpers:rpc(Config, LaggingIdx, sys, resume,
+                                          [StoreId])
+    end,
+    ?awaitMatch(blocked, block_status(Config, 0), 10000),
+    ?assert(is_blocked(Config, LaggingIdx)),
+
+    ok = unblock(Config, 0),
+    ?assertEqual(unblocked, block_status(Config, 0)),
+    ok.
+
 block(Config) ->
-    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_block,
+    block(Config, 0).
+
+block(Config, Node) ->
+    rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_delayed_message_block,
                                  block, []).
 
+block(Config, Node, Timeout) ->
+    rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_delayed_message_block,
+                                 block, [Timeout]).
+
 unblock(Config) ->
-    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_block,
+    unblock(Config, 0).
+
+unblock(Config, Node) ->
+    rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_delayed_message_block,
                                  unblock, []).
 
 is_blocked(Config) ->
-    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_block,
+    is_blocked(Config, 0).
+
+is_blocked(Config, Node) ->
+    rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_delayed_message_block,
                                  is_blocked, []).
+
+block_status(Config) ->
+    block_status(Config, 0).
+
+block_status(Config, Node) ->
+    rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_delayed_message_block,
+                                 status, []).
+
+publish_confirmed(Config, Node, Ex, Delay) ->
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Node),
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    publish_messages(Ch, Ex, [Delay]),
+    true = amqp_channel:wait_for_confirms(Ch, 5000),
+    rabbit_ct_client_helpers:close_channel(Ch).
+
+make_quorum_queue(Q) ->
+    QR = make_durable_queue(Q),
+    QR#'queue.declare'{
+      arguments = [{<<"x-queue-type">>, longstr, <<"quorum">>}]
+     }.
 
 queue_message_count(Chan, Q) ->
     #'queue.declare_ok'{message_count = N} =

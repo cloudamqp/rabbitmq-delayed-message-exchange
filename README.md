@@ -257,9 +257,25 @@ rabbitmqctl eval 'rabbit_delayed_message_block:block().'
 # ... rolling upgrade ...
 rabbitmqctl eval 'rabbit_delayed_message_block:unblock().'
 
-# check the current state
-rabbitmqctl eval 'rabbit_delayed_message_block:is_blocked().'
+# check the state across the cluster
+rabbitmqctl eval 'rabbit_delayed_message_block:status().'
 ```
+
+Every node applies a block or an unblock on its own, so `block()` and
+`unblock()` wait, 5 seconds by default, for every running node with the plugin
+to apply it. They return:
+
+ * `ok`: every node has applied it. After `block()`, it is safe to start the
+   upgrade
+ * `{applying, Nodes}`: the nodes listed have not applied it yet. Wait, and check
+   again with `status()` before going on
+
+`block(Timeout)` and `unblock(Timeout)` take the wait in milliseconds instead.
+
+`status()` returns `blocked` or `unblocked` once every running node with the
+plugin agrees with the stored state, and `{applying, Nodes}` while the nodes
+listed have not caught up yet. Nodes that are down are not waited for: they
+route nothing, and come back in the stored state.
 
 While routing is blocked:
 
@@ -276,7 +292,7 @@ While routing is blocked:
 Unblocking routes every message that expired meanwhile, in delay order, and
 routing goes back to normal. Nodes running a plugin version without this feature
 ignore the block, so it only protects a cluster where every node already runs a
-version that has it.
+version that has it. `block()` and `status()` list such nodes as `applying`.
 
 ## Performance Impact ##
 
