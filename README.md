@@ -289,10 +289,14 @@ While routing is blocked:
  * the block is stored in the metadata store (Khepri), so a node that restarts
    comes back blocked
 
-Unblocking routes every message that expired meanwhile, in delay order, and
-routing goes back to normal. Nodes running a plugin version without this feature
-ignore the block, so it only protects a cluster where every node already runs a
-version that has it. `block()` and `status()` list such nodes as `applying`.
+Once routing is unblocked, each node goes back to routing as usual, starting
+with the messages that expired meanwhile, in delay order. `unblock()` does not
+wait for those messages to be routed: it returns once every node has lifted the
+block, and the routing happens in the background.
+
+Nodes running a plugin version without this feature ignore the block, so it only
+protects a cluster where every node already runs a version that has it. `block()`
+and `status()` list such nodes as `applying`.
 
 ## Performance Impact ##
 

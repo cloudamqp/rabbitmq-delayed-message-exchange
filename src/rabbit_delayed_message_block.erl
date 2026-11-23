@@ -9,8 +9,9 @@
 %% leaders and classic queue processes stop, and a delayed message routed
 %% then finds no route and is dropped. While routing is blocked, every
 %% x-delayed-message exchange keeps accepting and storing messages, but none
-%% is routed when its delay expires: it stays in the store. Unblocking routes
-%% every expired message, in delay order, and routing goes back to normal.
+%% is routed when its delay expires: it stays in the store. Once unblocked,
+%% each node's delayed message server goes back to routing as usual, starting
+%% with the messages that expired meanwhile, in delay order.
 %% Messages published without a delay are not affected: the publishing
 %% channel routes them, and the publisher learns about a failed route.
 %%
@@ -83,9 +84,10 @@ block(Timeout) ->
         {error, _} = Error -> Error
     end.
 
-%% Routes every message that expired while blocked and resumes normal
-%% routing, on every node. Unblocking when not blocked is a no-op. Waits and
-%% returns like block/1.
+%% Lifts the routing block. Unblocking when not blocked is a no-op. Waits and
+%% returns like block/1: `ok' means every node has applied it. It does not
+%% route anything itself: each node's delayed message server is notified and
+%% then routes the messages that expired while blocked, in the background.
 -spec unblock() -> result().
 unblock() ->
     unblock(?DEFAULT_TIMEOUT).
