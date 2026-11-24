@@ -7,6 +7,7 @@
 -module(rabbit_delayed_message).
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("kernel/include/logger.hrl").
+-include_lib("kernel/include/file.hrl").
 -include("rabbit_delayed_message.hrl").
 
 -define(APP, rabbitmq_delayed_message_exchange).
@@ -15,6 +16,8 @@
 %% because leveled never compacts its journal on its own and delegates
 %% invoking compaction to the application.
 -define(DEFAULT_COMPACTION_INTERVAL_SECONDS, 600).
+
+-define(BLOCK_CALL_TIMEOUT, 30000).
 
 -behaviour(gen_server).
 
@@ -35,6 +38,15 @@
 -export([refresh_config/0,
          compact_journal/0]).
 
+%% Operator exports: blocking routing of expired delayed messages, see
+%% block_routing/0
+-export([block_routing/0,
+         unblock_routing/0,
+         is_routing_blocked/0,
+         block_routing_all_nodes/0,
+         unblock_routing_all_nodes/0,
+         is_routing_blocked_all_nodes/0]).
+
 -import(rabbit_delayed_message_utils, [swap_delay_header/1]).
 
 -type t_reference() :: reference().
@@ -44,7 +56,7 @@
                 compaction_timer,
                 stats_state,
                 %% Whether routing of expired messages is blocked on this
-                %% node, persisted by rabbit_delayed_message_block.
+                %% node, persisted as a marker file, see block_routing/0.
                 routing_blocked = false :: boolean()}).
 
 %%--------------------------------------------------------------------
@@ -89,6 +101,54 @@ refresh_config() ->
 compact_journal() ->
     gen_server:call(?MODULE, compact_journal, infinity).
 
+%% Blocks the routing of expired delayed messages on this node.
+%%
+%% Meant for rolling upgrades: while nodes restart, quorum queues elect new
+%% leaders and classic queue processes stop, and a delayed message routed
+%% then finds no route and is dropped. While routing is blocked, every
+%% x-delayed-message exchange keeps accepting and storing messages on this
+%% node, but none is routed when its delay expires: it stays in the store.
+%% Messages published without a delay are not affected: the publishing
+%% channel routes them, and the publisher learns about a failed route.
+%%
+%% The block is persisted as an empty marker file, written to disk before
+%% this returns, so a node restarting while blocked comes back blocked.
+%% Blocking when already blocked is a no-op.
+-spec block_routing() -> ok | {error, term()}.
+block_routing() ->
+    block_call(block_routing).
+
+%% Lifts the block on this node. Unblocking when not blocked is a no-op. It
+%% does not route anything itself: the server then routes the messages that
+%% expired while blocked, in delay order, in the background.
+-spec unblock_routing() -> ok | {error, term()}.
+unblock_routing() ->
+    block_call(unblock_routing).
+
+-spec is_routing_blocked() -> boolean() | {error, term()}.
+is_routing_blocked() ->
+    block_call(is_routing_blocked).
+
+%% block_routing/0 on every running node. `ok' once every node has persisted
+%% the block, otherwise the nodes that failed, with the reason.
+-spec block_routing_all_nodes() -> ok | {error, [{node(), term()}]}.
+block_routing_all_nodes() ->
+    on_all_nodes(block_routing).
+
+%% unblock_routing/0 on every running node, returning like
+%% block_routing_all_nodes/0.
+-spec unblock_routing_all_nodes() -> ok | {error, [{node(), term()}]}.
+unblock_routing_all_nodes() ->
+    on_all_nodes(unblock_routing).
+
+-spec is_routing_blocked_all_nodes() ->
+    [{node(), boolean() | {error, term()}}].
+is_routing_blocked_all_nodes() ->
+    Nodes = rabbit_nodes:list_running(),
+    Results = erpc:multicall(Nodes, ?MODULE, is_routing_blocked, [],
+                             ?BLOCK_CALL_TIMEOUT),
+    [{Node, unwrap(Result)} || {Node, Result} <- lists:zip(Nodes, Results)].
+
 %%--------------------------------------------------------------------
 init([]) ->
     %% Trap exits so terminate/2 runs on supervisor shutdown and we get
@@ -97,7 +157,7 @@ init([]) ->
     process_flag(trap_exit, true),
     setup(),
     _ = recover(),
-    {ok, Blocked} = rabbit_delayed_message_block:open(),
+    Blocked = read_routing_block(),
     Timer = case Blocked of
                 true ->
                     ?LOG_INFO("Delayed message exchange: routing of expired "
@@ -126,7 +186,7 @@ handle_call({delay_message, Exchange, Message, Delay},
     State2 = State#state{timer = NewTimer},
     {reply, Reply, State2};
 handle_call(block_routing, _From, State) ->
-    case rabbit_delayed_message_block:persist(true) of
+    case write_routing_block(true) of
         ok ->
             ?LOG_INFO("Delayed message exchange: routing of expired delayed "
                       "messages blocked on this node"),
@@ -137,7 +197,7 @@ handle_call(block_routing, _From, State) ->
             {reply, Error, State}
     end;
 handle_call(unblock_routing, _From, State = #state{timer = CurrTimer}) ->
-    case rabbit_delayed_message_block:persist(false) of
+    case write_routing_block(false) of
         ok ->
             ?LOG_INFO("Delayed message exchange: routing of expired delayed "
                       "messages unblocked on this node"),
@@ -199,7 +259,6 @@ handle_info(_I, State) ->
     {noreply, State}.
 
 terminate(_, _) ->
-    ok = rabbit_delayed_message_block:close(),
     %% terminate/2 fires for both plugin disable and broker shutdown.
     %% Only the former should destroy the storage backend; on broker
     %% shutdown delayed messages must survive across restarts. Neither
@@ -216,6 +275,73 @@ terminate(_, _) ->
     end.
 
 code_change(_, State, _) -> {ok, State}.
+
+%%--------------------------------------------------------------------
+%% Routing block
+
+block_call(Request) ->
+    try
+        gen_server:call(?MODULE, Request, ?BLOCK_CALL_TIMEOUT)
+    catch
+        exit:{noproc, _}  -> {error, not_running};
+        exit:{timeout, _} -> {error, timeout}
+    end.
+
+on_all_nodes(Fun) ->
+    Nodes = rabbit_nodes:list_running(),
+    Results = erpc:multicall(Nodes, ?MODULE, Fun, [], ?BLOCK_CALL_TIMEOUT),
+    case [{Node, Reason}
+          || {Node, Result} <- lists:zip(Nodes, Results),
+             {error, Reason} <- [unwrap(Result)]] of
+        []     -> ok;
+        Failed -> {error, Failed}
+    end.
+
+unwrap({ok, Value})      -> Value;
+unwrap({_Class, Reason}) -> {error, Reason}.
+
+%% `<data dir>-delayed-message-exchange/routing_blocked', next to the data
+%% directory like RabbitMQ's own `<node>-feature_flags' and
+%% `<node>-plugins-expand'. Kept outside the data directory because on
+%% RabbitMQ 3.13 enabling khepri_db deletes most of its content.
+%%
+%% Not using rabbit_plugins:user_provided_plugins_data_dir/0 because this
+%% block feature is backported to RabbitMQ older than 4.2.6 (the first
+%% version to include the function).
+routing_block_file() ->
+    filename:join(rabbit:data_dir() ++ "-delayed-message-exchange",
+                  "routing_blocked").
+
+%% A file that cannot be checked counts as present: holding messages back
+%% is safer than routing them while an operator may have blocked the node.
+read_routing_block() ->
+    File = routing_block_file(),
+    case file:read_file_info(File) of
+        {ok, #file_info{}} ->
+            true;
+        {error, enoent} ->
+            false;
+        {error, Reason} ->
+            ?LOG_ERROR("Delayed message exchange: could not check routing "
+                       "block file ~ts (~tp), blocking routing on this node",
+                       [File, Reason]),
+            true
+    end.
+
+%% The marker file is synced to disk when created, so the block survives a
+%% crash or a restart right after.
+write_routing_block(true) ->
+    File = routing_block_file(),
+    case filelib:ensure_dir(File) of
+        ok                 -> file:write_file(File, <<>>, [sync]);
+        {error, _} = Error -> Error
+    end;
+write_routing_block(false) ->
+    case file:delete(routing_block_file()) of
+        ok              -> ok;
+        {error, enoent} -> ok;
+        {error, _} = E  -> E
+    end.
 
 %%--------------------------------------------------------------------
 get_many(Key) ->

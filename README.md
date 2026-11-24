@@ -257,23 +257,24 @@ block. Since a queue may live on another node than the delayed message, block
 every node before the upgrade:
 
 ``` bash
-rabbitmqctl eval 'rabbit_delayed_message_block:block_all_nodes().'
+rabbitmqctl eval 'rabbit_delayed_message:block_routing_all_nodes().'
 # ... rolling upgrade ...
-rabbitmqctl eval 'rabbit_delayed_message_block:unblock_all_nodes().'
+rabbitmqctl eval 'rabbit_delayed_message:unblock_routing_all_nodes().'
 
 # the state of every running node
-rabbitmqctl eval 'rabbit_delayed_message_block:status_all_nodes().'
+rabbitmqctl eval 'rabbit_delayed_message:is_routing_blocked_all_nodes().'
 ```
 
-`block_all_nodes()` and `unblock_all_nodes()` return `ok` once every running node
-has applied the change, or `{error, [{Node, Reason}]}` for the nodes that did not.
-A node that was down is not reached: run `block()` on it with
-`rabbitmqctl -n <node> eval`, or `block_all_nodes()` again once it is up.
+`block_routing_all_nodes()` and `unblock_routing_all_nodes()` return `ok` once
+every running node has applied the change, or `{error, [{Node, Reason}]}` for the
+nodes that did not. A node that was down is not reached: block it once it is up,
+or create its marker file (see below) before starting it.
 
-The per-node functions are `block()`, `unblock()` and `is_blocked()`:
+The per-node functions are `block_routing()`, `unblock_routing()` and
+`is_routing_blocked()`:
 
 ``` bash
-rabbitmqctl -n rabbit@node1 eval 'rabbit_delayed_message_block:block().'
+rabbitmqctl -n rabbit@node1 eval 'rabbit_delayed_message:block_routing().'
 ```
 
 While routing is blocked on a node:
@@ -285,19 +286,20 @@ While routing is blocked on a node:
  * messages published **without** a delay are routed as usual: the publishing
    channel routes them, so publishers learn about a missing route through
    publisher confirms or the `mandatory` flag
- * the block is written to disk before `block()` returns, so the node comes back
-   blocked after a restart
+ * the block is written to disk before `block_routing()` returns, so the node
+   comes back blocked after a restart
 
 Once unblocked, the node goes back to routing as usual, starting with the
-messages that expired meanwhile, in delay order. `unblock()` does not wait for
-those messages to be routed: the routing happens in the background.
+messages that expired meanwhile, in delay order. `unblock_routing()` does not
+wait for those messages to be routed: the routing happens in the background.
 
-The block is stored in a DETS file next to the node's data directory, in
-`<data dir>-delayed-message-exchange/routing_block.dets` (for example
-`/var/lib/rabbitmq/mnesia/rabbit@hostname-delayed-message-exchange/`). It is
-kept outside the data directory because on RabbitMQ 3.13, enabling the
-`khepri_db` feature flag deletes most of the data directory's content. The file
-is not removed when the plugin is disabled or the node is reset.
+The block is an empty marker file next to the node's data directory: routing is
+blocked while `<data dir>-delayed-message-exchange/routing_blocked` exists (for
+example `/var/lib/rabbitmq/mnesia/rabbit@hostname-delayed-message-exchange/routing_blocked`).
+Creating the file by hand while a node is down makes it start blocked. It is kept
+outside the data directory because on RabbitMQ 3.13, enabling the `khepri_db`
+feature flag deletes most of the data directory's content. The file is not
+removed when the plugin is disabled or the node is reset.
 
 Nodes running a plugin version without this feature ignore the block.
 
