@@ -127,6 +127,10 @@ close() ->
 %% `<data dir>-delayed-message-exchange/routing_block.dets', next to the
 %% data directory like RabbitMQ's own `<node>-feature_flags' and
 %% `<node>-plugins-expand'.
+%%
+%% Not using rabbit_plugins:user_provided_plugins_data_dir/0 because this
+%% block feature is backported to RabbitMQ older than 4.2.6 (the first
+%% version to include the function).
 -spec file() -> file:filename().
 file() ->
     filename:join(rabbit:data_dir() ++ "-delayed-message-exchange",
