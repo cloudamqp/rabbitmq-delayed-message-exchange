@@ -42,7 +42,10 @@
 
 -record(state, {timer,
                 compaction_timer,
-                stats_state}).
+                stats_state,
+                %% Whether routing of expired messages is blocked on this
+                %% node, persisted by rabbit_delayed_message_block.
+                routing_blocked = false :: boolean()}).
 
 %%--------------------------------------------------------------------
 % Public API exports
@@ -94,16 +97,65 @@ init([]) ->
     process_flag(trap_exit, true),
     setup(),
     _ = recover(),
-    State0 = #state{timer = maybe_delay_first(),
-                    compaction_timer = schedule_compaction()},
+    {ok, Blocked} = rabbit_delayed_message_block:open(),
+    Timer = case Blocked of
+                true ->
+                    ?LOG_INFO("Delayed message exchange: routing of expired "
+                              "delayed messages is blocked on this node"),
+                    not_set;
+                false ->
+                    maybe_delay_first()
+            end,
+    State0 = #state{timer = Timer,
+                    compaction_timer = schedule_compaction(),
+                    routing_blocked = Blocked},
     State = rabbit_event:init_stats_timer(State0, #state.stats_state),
     {ok, State}.
 
+handle_call({delay_message, Exchange, Message, Delay},
+            _From, State = #state{timer = CurrTimer,
+                                  routing_blocked = true}) ->
+    %% Routing is blocked: store the message, but start no timer until
+    %% routing is unblocked.
+    _ = store_delayed(erlang:system_time(milli_seconds) + Delay,
+                       Exchange, Message),
+    {reply, {ok, CurrTimer}, State};
 handle_call({delay_message, Exchange, Message, Delay},
             _From, State = #state{timer = CurrTimer}) ->
     Reply = {ok, NewTimer} = internal_delay_message(CurrTimer, Exchange, Message, Delay),
     State2 = State#state{timer = NewTimer},
     {reply, Reply, State2};
+handle_call(block_routing, _From, State) ->
+    case rabbit_delayed_message_block:persist(true) of
+        ok ->
+            ?LOG_INFO("Delayed message exchange: routing of expired delayed "
+                      "messages blocked on this node"),
+            %% A pending timer is left to fire: it finds routing blocked
+            %% and stops.
+            {reply, ok, State#state{routing_blocked = true}};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end;
+handle_call(unblock_routing, _From, State = #state{timer = CurrTimer}) ->
+    case rabbit_delayed_message_block:persist(false) of
+        ok ->
+            ?LOG_INFO("Delayed message exchange: routing of expired delayed "
+                      "messages unblocked on this node"),
+            %% No timer runs while blocked, but one started before the
+            %% block may still be pending: replace it so that it does not
+            %% fire twice.
+            _ = case CurrTimer of
+                    not_set -> ok;
+                    _       -> erlang:cancel_timer(CurrTimer)
+                end,
+            {reply, ok, State#state{routing_blocked = false,
+                                    timer = maybe_delay_first()}};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end;
+handle_call(is_routing_blocked, _From,
+            State = #state{routing_blocked = Blocked}) ->
+    {reply, Blocked, State};
 handle_call(compact_journal, _From, State) ->
     {reply, compact_journal_now(), State};
 handle_call(refresh_config, _From, State) ->
@@ -117,6 +169,11 @@ handle_cast({exchange_deleted, Id}, State) ->
 handle_cast(_C, State) ->
     {noreply, State}.
 
+handle_info({timeout, _TimerRef, {deliver, _Key}},
+            State = #state{routing_blocked = true}) ->
+    %% Routing is blocked: leave the message in the store and stop the
+    %% timer. Unblocking restarts it.
+    {noreply, State#state{timer = not_set}};
 handle_info({timeout, _TimerRef, {deliver, Key}}, State) ->
     case get_many(Key) of
         [] ->
@@ -142,6 +199,7 @@ handle_info(_I, State) ->
     {noreply, State}.
 
 terminate(_, _) ->
+    ok = rabbit_delayed_message_block:close(),
     %% terminate/2 fires for both plugin disable and broker shutdown.
     %% Only the former should destroy the storage backend; on broker
     %% shutdown delayed messages must survive across restarts. Neither

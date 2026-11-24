@@ -17,7 +17,8 @@
 all() ->
     [
       {group, leveled},
-      {group, leveled_projection_v1}
+      {group, leveled_projection_v1},
+      {group, cluster}
     ].
 
 groups() ->
@@ -32,6 +33,8 @@ groups() ->
                           journal_compaction_on_live_store,
                           disable_cleanup]},
       {leveled_projection_v1, [], [topic_projection_v1_to_v2_migration]},
+      {cluster, [], [block_is_per_node,
+                     block_all_nodes_survives_remote_restart]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
@@ -50,7 +53,11 @@ groups() ->
                                 counter_survives_restart,
                                 node_restart_before_delay_expires,
                                 node_restart_after_delay_expires,
-                                string_delay_header
+                                string_delay_header,
+                                block_and_unblock,
+                                block_survives_restart,
+                                block_survives_server_crash,
+                                block_file_is_outside_data_dir
                                ]},
      {fine_stats, [], [
                        e2e_nodelay,
@@ -99,6 +106,18 @@ init_per_group(leveled_projection_v1, Config) ->
                  [{forced_feature_flags_on_init,
                    {rel, [], [delayed_message_topic_projection_v2]}}]}),
     run_broker_and_clients(Config2);
+init_per_group(cluster, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(
+        Config,
+        [
+            {metadata_store, khepri},
+            {rmq_nodes_count, 3},
+            {rmq_nodes_clustered, true},
+            {rmq_nodename_suffix, rabbit_delayed_message_utils:append_to_atom(?MODULE, "-cluster")},
+            {tcp_ports_base, 21700}
+        ]
+    ),
+    run_broker_and_clients(Config1);
 init_per_group(fine_stats, Config) ->
     CollectStatsOrig = get_collect_stats(Config),
     set_collect_stats(Config, fine),
@@ -110,6 +129,8 @@ init_per_group(_, Config) ->
 end_per_group(leveled, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(leveled_projection_v1, Config) ->
+    teardown_broker_and_clients(Config);
+end_per_group(cluster, Config) ->
     teardown_broker_and_clients(Config);
 end_per_group(fine_stats, Config) ->
     CollectStatsOrig = rabbit_ct_helpers:get_config(Config, collect_statistics_orig),
@@ -142,6 +163,18 @@ init_per_testcase(Testcase, Config) ->
     reset_publish_out_stats(Config),
     rabbit_ct_helpers:testcase_started(Config1, Testcase).
 
+end_per_testcase(Testcase, Config)
+  when Testcase =:= block_and_unblock;
+       Testcase =:= block_survives_restart;
+       Testcase =:= block_survives_server_crash;
+       Testcase =:= block_file_is_outside_data_dir;
+       Testcase =:= block_is_per_node;
+       Testcase =:= block_all_nodes_survives_remote_restart ->
+    %% Never leave routing blocked behind for the next test cases.
+    NodeCount = length(rabbit_ct_broker_helpers:get_node_configs(Config,
+                                                                 nodename)),
+    _ = [catch unblock(Config, Node) || Node <- lists:seq(0, NodeCount - 1)],
+    rabbit_ct_helpers:testcase_finished(Config, Testcase);
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
@@ -893,6 +926,230 @@ string_delay_header(Config) ->
 
     ok.
 
+%% While routing is blocked, no delayed message of any exchange is routed when
+%% it expires; unblocking routes them all in delay order. Messages without a
+%% delay are routed as usual.
+block_and_unblock(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex1 = make_exchange_name(Config, "1"),
+    Q1 = make_queue_name(Config, "1"),
+    Ex2 = make_exchange_name(Config, "2"),
+    Q2 = make_queue_name(Config, "2"),
+
+    setup_fabric(Chan, make_exchange(Ex1, <<"direct">>), make_queue(Q1)),
+    setup_fabric(Chan, make_exchange(Ex2, <<"direct">>), make_queue(Q2)),
+
+    %% Published before the block, so the server has a timer running for
+    %% it when routing gets blocked.
+    publish_messages(Chan, Ex1, [1000]),
+    ?awaitMatch(1, messages_delayed(Config, <<"/">>, Ex1), 3000),
+
+    ?assertNot(is_blocked(Config, 0)),
+    ok = block(Config, 0),
+    ?assert(is_blocked(Config, 0)),
+    %% Blocking again is a no-op.
+    ok = block(Config, 0),
+
+    publish_messages(Chan, Ex1, [300, 100]),
+    publish_messages(Chan, Ex2, [200]),
+    ?awaitMatch(3, messages_delayed(Config, <<"/">>, Ex1), 3000),
+    ?awaitMatch(1, messages_delayed(Config, <<"/">>, Ex2), 3000),
+
+    %% A message without a delay is not held back.
+    publish_messages(Chan, Ex2, [0]),
+    ?awaitMatch(1, queue_message_count(Chan, Q2), 3000),
+
+    timer:sleep(2000),
+    ?assertEqual(0, queue_message_count(Chan, Q1)),
+    ?assertEqual(1, queue_message_count(Chan, Q2)),
+    ?assertEqual(3, messages_delayed(Config, <<"/">>, Ex1)),
+    ?assertEqual(1, messages_delayed(Config, <<"/">>, Ex2)),
+
+    ok = unblock(Config, 0),
+    ?assertNot(is_blocked(Config, 0)),
+    %% Unblocking again is a no-op.
+    ok = unblock(Config, 0),
+
+    {ok, Result1} = consume(Chan, Q1, [100, 300, 1000]),
+    ?assertEqual([100, 300, 1000], Result1),
+    {ok, Result2} = consume(Chan, Q2, [0, 200]),
+    ?assertEqual([0, 200], Result2),
+    ?awaitMatch(0, messages_delayed(Config, <<"/">>, Ex1), 3000),
+    ?awaitMatch(0, messages_delayed(Config, <<"/">>, Ex2), 3000),
+
+    delete_exchange(Chan, Ex1),
+    delete_exchange(Chan, Ex2),
+    #'queue.delete_ok'{} = amqp_channel:call(Chan, #'queue.delete'{queue = Q1}),
+    #'queue.delete_ok'{} = amqp_channel:call(Chan, #'queue.delete'{queue = Q2}),
+    rabbit_ct_client_helpers:close_channel(Chan),
+    ok.
+
+%% The block is persisted: a node restarting while blocked comes back
+%% blocked, and keeps the messages that expired.
+block_survives_restart(Config) ->
+    Chan = rabbit_ct_client_helpers:open_channel(Config),
+
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+
+    setup_fabric(Chan, make_durable_exchange(Ex, <<"direct">>),
+                 make_durable_queue(Q)),
+
+    ok = block(Config, 0),
+
+    Msgs = [400, 100, 300, 200],
+    amqp_channel:call(Chan, #'confirm.select'{}),
+    publish_messages(Chan, Ex, Msgs),
+    amqp_channel:wait_for_confirms_or_die(Chan),
+    timer:sleep(lists:max(Msgs) + 500),
+
+    rabbit_ct_broker_helpers:restart_node(Config, 0),
+    Chan2 = rabbit_ct_client_helpers:open_channel(Config),
+
+    ?assert(is_blocked(Config, 0)),
+    timer:sleep(1000),
+    ?assertEqual(0, queue_message_count(Chan2, Q)),
+    ?assertEqual(4, messages_delayed(Config, <<"/">>, Ex)),
+
+    ok = unblock(Config, 0),
+    {ok, Result} = consume(Chan2, Q, Msgs),
+    ?assertEqual(lists:sort(Msgs), Result),
+
+    delete_exchange(Chan2, Ex),
+    #'queue.delete_ok'{} = amqp_channel:call(Chan2, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Chan2),
+    ok.
+
+%% The delayed message server restarted by its supervisor reads the block
+%% back from disk.
+block_survives_server_crash(Config) ->
+    ok = block(Config, 0),
+    Pid = rabbit_ct_broker_helpers:rpc(Config, 0, erlang, whereis,
+                                       [rabbit_delayed_message]),
+    true = rabbit_ct_broker_helpers:rpc(Config, 0, erlang, exit,
+                                        [Pid, kill]),
+    ?awaitMatch(Pid1 when is_pid(Pid1) andalso Pid1 =/= Pid,
+                rabbit_ct_broker_helpers:rpc(Config, 0, erlang, whereis,
+                                             [rabbit_delayed_message]),
+                5000),
+    ?assert(is_blocked(Config, 0)),
+    ok = unblock(Config, 0),
+    ?assertNot(is_blocked(Config, 0)),
+    ok.
+
+%% On RabbitMQ 3.13 the Mnesia to Khepri migration deletes the content of
+%% the data directory, so the block must live outside of it.
+block_file_is_outside_data_dir(Config) ->
+    ok = block(Config, 0),
+    DataDir = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit, data_dir, []),
+    File = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_block,
+                                        file, []),
+    ?assertEqual(DataDir ++ "-delayed-message-exchange",
+                 filename:dirname(File)),
+    ?assertNot(lists:prefix(DataDir ++ "/", File)),
+    ?assert(rabbit_ct_broker_helpers:rpc(Config, 0, filelib, is_regular,
+                                         [File])),
+    ok.
+
+%% A block holds back only the messages delayed on its node: delayed
+%% messages are stored on the node that accepted the publish.
+block_is_per_node(Config) ->
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+    Ch0 = rabbit_ct_client_helpers:open_channel(Config, 0),
+    setup_fabric(Ch0, make_durable_exchange(Ex, <<"direct">>),
+                 make_quorum_queue(Q)),
+
+    ok = block(Config, 0),
+    ?assert(is_blocked(Config, 0)),
+    ?assertNot(is_blocked(Config, 1)),
+
+    publish_confirmed(Config, 0, Ex, 300),
+    publish_confirmed(Config, 1, Ex, 400),
+    %% Only the message delayed on node 1 is routed.
+    ?awaitMatch(1, queue_message_count(Ch0, Q), 5000),
+    timer:sleep(1000),
+    ?assertEqual(1, queue_message_count(Ch0, Q)),
+
+    ok = unblock(Config, 0),
+    ?awaitMatch(2, queue_message_count(Ch0, Q), 5000),
+
+    delete_exchange(Ch0, Ex),
+    #'queue.delete_ok'{} = amqp_channel:call(Ch0, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Ch0),
+    ok.
+
+%% block_all_nodes/0 blocks every node, which hold some delayed messages
+%% each; a node restarted while blocked comes back blocked, and
+%% unblock_all_nodes/0 releases them all.
+block_all_nodes_survives_remote_restart(Config) ->
+    Ex = make_exchange_name(Config, "1"),
+    Q = make_queue_name(Config, "1"),
+    Ch0 = rabbit_ct_client_helpers:open_channel(Config, 0),
+    setup_fabric(Ch0, make_durable_exchange(Ex, <<"direct">>),
+                 make_quorum_queue(Q)),
+    Nodes = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message_block,
+                                      block_all_nodes, []),
+    ?assertEqual(lists:sort([{N, true} || N <- Nodes]), status_all_nodes(Config)),
+
+    Msgs = [{0, 300}, {1, 400}, {2, 500}, {2, 200}],
+    [publish_confirmed(Config, Node, Ex, Delay) || {Node, Delay} <- Msgs],
+    timer:sleep(1500),
+    ?assertEqual(0, queue_message_count(Ch0, Q)),
+
+    rabbit_ct_broker_helpers:restart_node(Config, 2),
+    ?assert(is_blocked(Config, 2)),
+    timer:sleep(1000),
+    ?assertEqual(0, queue_message_count(Ch0, Q)),
+
+    ok = rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_delayed_message_block,
+                                      unblock_all_nodes, []),
+    ?assertEqual(lists:sort([{N, false} || N <- Nodes]), status_all_nodes(Config)),
+    ?awaitMatch(4, queue_message_count(Ch0, Q), 10000),
+
+    delete_exchange(Ch0, Ex),
+    #'queue.delete_ok'{} = amqp_channel:call(Ch0, #'queue.delete'{queue = Q}),
+    rabbit_ct_client_helpers:close_channel(Ch0),
+    ok.
+
+block(Config, Node) ->
+    rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_delayed_message_block,
+                                 block, []).
+
+unblock(Config, Node) ->
+    rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_delayed_message_block,
+                                 unblock, []).
+
+is_blocked(Config, Node) ->
+    rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_delayed_message_block,
+                                 is_blocked, []).
+
+status_all_nodes(Config) ->
+    lists:sort(rabbit_ct_broker_helpers:rpc(Config, 0,
+                                            rabbit_delayed_message_block,
+                                            status_all_nodes, [])).
+
+publish_confirmed(Config, Node, Ex, Delay) ->
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Node),
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    publish_messages(Ch, Ex, [Delay]),
+    true = amqp_channel:wait_for_confirms(Ch, 5000),
+    rabbit_ct_client_helpers:close_channel(Ch).
+
+make_quorum_queue(Q) ->
+    QR = make_durable_queue(Q),
+    QR#'queue.declare'{
+      arguments = [{<<"x-queue-type">>, longstr, <<"quorum">>}]
+     }.
+
+queue_message_count(Chan, Q) ->
+    #'queue.declare_ok'{message_count = N} =
+        amqp_channel:call(Chan, #'queue.declare'{queue = Q, passive = true}),
+    N.
+
 setup_fabric(Chan, ExDeclare, QueueDeclare) ->
     setup_fabric(Chan, ExDeclare, QueueDeclare, <<>>).
 
@@ -1149,9 +1406,10 @@ with_bookie_opts(Config, Opts) ->
          || {Key, _Value} <- Opts]
     end.
 
-%% The state record is #state{timer, compaction_timer, stats_state}.
+%% The state record is
+%% #state{timer, compaction_timer, stats_state, routing_blocked}.
 compaction_timer(Config) ->
-    {state, _Timer, TRef, _StatsState} =
+    {state, _Timer, TRef, _StatsState, _RoutingBlocked} =
         rabbit_ct_broker_helpers:rpc(
           Config, 0, sys, get_state, [rabbit_delayed_message]),
     TRef.
