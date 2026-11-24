@@ -42,10 +42,7 @@
 %% block_routing/0
 -export([block_routing/0,
          unblock_routing/0,
-         is_routing_blocked/0,
-         block_routing_all_nodes/0,
-         unblock_routing_all_nodes/0,
-         is_routing_blocked_all_nodes/0]).
+         is_routing_blocked/0]).
 
 -import(rabbit_delayed_message_utils, [swap_delay_header/1]).
 
@@ -128,26 +125,6 @@ unblock_routing() ->
 -spec is_routing_blocked() -> boolean() | {error, term()}.
 is_routing_blocked() ->
     block_call(is_routing_blocked).
-
-%% block_routing/0 on every running node. `ok' once every node has persisted
-%% the block, otherwise the nodes that failed, with the reason.
--spec block_routing_all_nodes() -> ok | {error, [{node(), term()}]}.
-block_routing_all_nodes() ->
-    on_all_nodes(block_routing).
-
-%% unblock_routing/0 on every running node, returning like
-%% block_routing_all_nodes/0.
--spec unblock_routing_all_nodes() -> ok | {error, [{node(), term()}]}.
-unblock_routing_all_nodes() ->
-    on_all_nodes(unblock_routing).
-
--spec is_routing_blocked_all_nodes() ->
-    [{node(), boolean() | {error, term()}}].
-is_routing_blocked_all_nodes() ->
-    Nodes = rabbit_nodes:list_running(),
-    Results = erpc:multicall(Nodes, ?MODULE, is_routing_blocked, [],
-                             ?BLOCK_CALL_TIMEOUT),
-    [{Node, unwrap(Result)} || {Node, Result} <- lists:zip(Nodes, Results)].
 
 %%--------------------------------------------------------------------
 init([]) ->
@@ -286,19 +263,6 @@ block_call(Request) ->
         exit:{noproc, _}  -> {error, not_running};
         exit:{timeout, _} -> {error, timeout}
     end.
-
-on_all_nodes(Fun) ->
-    Nodes = rabbit_nodes:list_running(),
-    Results = erpc:multicall(Nodes, ?MODULE, Fun, [], ?BLOCK_CALL_TIMEOUT),
-    case [{Node, Reason}
-          || {Node, Result} <- lists:zip(Nodes, Results),
-             {error, Reason} <- [unwrap(Result)]] of
-        []     -> ok;
-        Failed -> {error, Failed}
-    end.
-
-unwrap({ok, Value})      -> Value;
-unwrap({_Class, Reason}) -> {error, Reason}.
 
 %% `<data dir>-delayed-message-exchange/routing_blocked', next to the data
 %% directory like RabbitMQ's own `<node>-feature_flags' and

@@ -34,7 +34,7 @@ groups() ->
                           disable_cleanup]},
       {leveled_projection_v1, [], [topic_projection_v1_to_v2_migration]},
       {cluster, [], [block_is_per_node,
-                     block_routing_all_nodes_survives_remote_restart]},
+                     block_every_node_survives_remote_restart]},
       {non_parallel_tests, [], [
                                 wrong_exchange_argument_type,
                                 exchange_argument_type_not_self,
@@ -171,7 +171,7 @@ end_per_testcase(Testcase, Config)
        Testcase =:= block_file_is_outside_data_dir;
        Testcase =:= block_file_created_while_node_is_down;
        Testcase =:= block_is_per_node;
-       Testcase =:= block_routing_all_nodes_survives_remote_restart ->
+       Testcase =:= block_every_node_survives_remote_restart ->
     %% Never leave routing blocked behind for the next test cases.
     NodeCount = length(rabbit_ct_broker_helpers:get_node_configs(Config,
                                                                  nodename)),
@@ -1096,20 +1096,19 @@ block_is_per_node(Config) ->
     rabbit_ct_client_helpers:close_channel(Ch0),
     ok.
 
-%% block_routing_all_nodes/0 blocks every node, which hold some delayed messages
-%% each; a node restarted while blocked comes back blocked, and
-%% unblock_routing_all_nodes/0 releases them all.
-block_routing_all_nodes_survives_remote_restart(Config) ->
+%% Every node is blocked, and holds some delayed messages; a node restarted
+%% while blocked comes back blocked, and unblocking every node releases them
+%% all.
+block_every_node_survives_remote_restart(Config) ->
     Ex = make_exchange_name(Config, "1"),
     Q = make_queue_name(Config, "1"),
     Ch0 = rabbit_ct_client_helpers:open_channel(Config, 0),
     setup_fabric(Ch0, make_durable_exchange(Ex, <<"direct">>),
                  make_quorum_queue(Q)),
-    Nodes = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Nodes = [0, 1, 2],
 
-    ok = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_delayed_message,
-                                      block_routing_all_nodes, []),
-    ?assertEqual(lists:sort([{N, true} || N <- Nodes]), status_all_nodes(Config)),
+    [ok = block(Config, N) || N <- Nodes],
+    [?assert(is_blocked(Config, N)) || N <- Nodes],
 
     Msgs = [{0, 300}, {1, 400}, {2, 500}, {2, 200}],
     [publish_confirmed(Config, Node, Ex, Delay) || {Node, Delay} <- Msgs],
@@ -1121,9 +1120,8 @@ block_routing_all_nodes_survives_remote_restart(Config) ->
     timer:sleep(1000),
     ?assertEqual(0, queue_message_count(Ch0, Q)),
 
-    ok = rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_delayed_message,
-                                      unblock_routing_all_nodes, []),
-    ?assertEqual(lists:sort([{N, false} || N <- Nodes]), status_all_nodes(Config)),
+    [ok = unblock(Config, N) || N <- Nodes],
+    [?assertNot(is_blocked(Config, N)) || N <- Nodes],
     ?awaitMatch(4, queue_message_count(Ch0, Q), 10000),
 
     delete_exchange(Ch0, Ex),
@@ -1142,12 +1140,6 @@ unblock(Config, Node) ->
 is_blocked(Config, Node) ->
     rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_delayed_message,
                                  is_routing_blocked, []).
-
-status_all_nodes(Config) ->
-    lists:sort(rabbit_ct_broker_helpers:rpc(Config, 0,
-                                            rabbit_delayed_message,
-                                            is_routing_blocked_all_nodes,
-                                            [])).
 
 %% The nodes run on the test host, so the test reads the marker file
 %% directly.

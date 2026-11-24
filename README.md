@@ -254,28 +254,19 @@ after it.
 
 The block is per node: each node keeps its own delayed messages and its own
 block. Since a queue may live on another node than the delayed message, block
-every node before the upgrade:
-
-``` bash
-rabbitmqctl eval 'rabbit_delayed_message:block_routing_all_nodes().'
-# ... rolling upgrade ...
-rabbitmqctl eval 'rabbit_delayed_message:unblock_routing_all_nodes().'
-
-# the state of every running node
-rabbitmqctl eval 'rabbit_delayed_message:is_routing_blocked_all_nodes().'
-```
-
-`block_routing_all_nodes()` and `unblock_routing_all_nodes()` return `ok` once
-every running node has applied the change, or `{error, [{Node, Reason}]}` for the
-nodes that did not. A node that was down is not reached: block it once it is up,
-or create its marker file (see below) before starting it.
-
-The per-node functions are `block_routing()`, `unblock_routing()` and
-`is_routing_blocked()`:
+every node before the upgrade, and unblock every node after it:
 
 ``` bash
 rabbitmqctl -n rabbit@node1 eval 'rabbit_delayed_message:block_routing().'
+# ... the same for every node, then the rolling upgrade ...
+rabbitmqctl -n rabbit@node1 eval 'rabbit_delayed_message:unblock_routing().'
+
+# the state of a node
+rabbitmqctl -n rabbit@node1 eval 'rabbit_delayed_message:is_routing_blocked().'
 ```
+
+A node that is down can be blocked by creating its marker file (see below)
+before starting it.
 
 While routing is blocked on a node:
 
