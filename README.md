@@ -244,6 +244,56 @@ different exchange type, like `"topic"` for example. You can also
 specify exchange types provided by plugins. Note that this argument is
 **required** and **must** refer to an **existing exchange type**.
 
+## Blocking Routing During Upgrades
+
+While nodes restart during a rolling upgrade, quorum queues elect new leaders
+and classic queue processes stop. A delayed message whose delay expires at that
+moment can find no route and is then dropped silently. To avoid that, routing of
+expired delayed messages can be **blocked** before the upgrade and **unblocked**
+after it.
+
+The block is per node: each node keeps its own delayed messages and its own
+block. Since a queue may live on another node than the delayed message, block
+every node before the upgrade, and unblock every node after it:
+
+``` bash
+rabbitmqctl -n rabbit@node1 eval 'rabbit_delayed_message:block_routing().'
+# ... the same for every node, then the rolling upgrade ...
+rabbitmqctl -n rabbit@node1 eval 'rabbit_delayed_message:unblock_routing().'
+
+# the state of a node
+rabbitmqctl -n rabbit@node1 eval 'rabbit_delayed_message:is_routing_blocked().'
+```
+
+A node that is down can be blocked by creating its marker file (see below)
+before starting it.
+
+While routing is blocked on a node:
+
+ * every `x-delayed-message` exchange keeps accepting and storing delayed
+   messages on that node, but routes none of them when their delay expires:
+   they stay stored, and still count in `messages_delayed` and in the
+   Prometheus metrics
+ * messages published **without** a delay are routed as usual: the publishing
+   channel routes them, so publishers learn about a missing route through
+   publisher confirms or the `mandatory` flag
+ * the block is written to disk before `block_routing()` returns, so the node
+   comes back blocked after a restart
+
+Once unblocked, the node goes back to routing as usual, starting with the
+messages that expired meanwhile, in delay order. `unblock_routing()` does not
+wait for those messages to be routed: the routing happens in the background.
+
+The block is an empty marker file next to the node's data directory: routing is
+blocked while `<data dir>-delayed-message-exchange/routing_blocked` exists (for
+example `/var/lib/rabbitmq/mnesia/rabbit@hostname-delayed-message-exchange/routing_blocked`).
+Creating the file by hand while a node is down makes it start blocked. It is kept
+outside the data directory because on RabbitMQ 3.13, enabling the `khepri_db`
+feature flag deletes most of the data directory's content. The file is not
+removed when the plugin is disabled or the node is reset.
+
+Nodes running a plugin version without this feature ignore the block.
+
 ## Performance Impact ##
 
 Due to the `"x-delayed-type"` argument, one could use this exchange in
